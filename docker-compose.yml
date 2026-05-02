@@ -1,0 +1,15 @@
+services:
+  silent:
+    build: .
+    container_name: silent
+    restart: unless-stopped
+    volumes:
+      - ./checkpoints:/app/checkpoints:ro
+    networks:
+      - web
+    # Internal only — exposed to the shared "web" network for the
+    # caddy proxy. See jepa-vps-proxy/Caddyfile (/silent/* → silent:8801).
+
+networks:
+  web:
+    external: true
