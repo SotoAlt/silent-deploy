@@ -56,10 +56,17 @@ class JEPAPredatorV2:
                  n_samples: int = 16, n_iters: int = 2, horizon: int = 1,
                  ping_weight: float = 30.0, w_dist: float = 1.0,
                  ping_every: int = 30, ping_amp: float = 0.6):
-        # Use all available CPU cores for torch matmul
+        # Production override: env vars let us tune the CEM cost without
+        # rebuilding the image. SILENT_CEM_SAMPLES / SILENT_CEM_ITERS shrink
+        # the loop on slow CPUs (CPX21 vCPU = ~4x slower than M3). Threads
+        # cap is critical on shared vCPUs — too many threads thrash.
         import os as _os
+        n_samples = int(_os.environ.get('SILENT_CEM_SAMPLES', n_samples))
+        n_iters   = int(_os.environ.get('SILENT_CEM_ITERS',   n_iters))
         try:
-            torch.set_num_threads(max(1, _os.cpu_count() or 4))
+            n_threads = int(_os.environ.get(
+                'SILENT_TORCH_THREADS', max(1, _os.cpu_count() or 4)))
+            torch.set_num_threads(max(1, n_threads))
         except Exception:
             pass
         """ping_every / ping_amp: periodic 'scan ping' to keep the audio scene

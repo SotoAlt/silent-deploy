@@ -34,6 +34,16 @@ COPY client/ /app/client/
 ENV SDL_VIDEODRIVER=dummy
 ENV PYTHONUNBUFFERED=1
 
+# CPU tuning for Hetzner CPX21 (4 vCPU shared). Locally on M3 the full CEM
+# (16 samples × 2 iters) hits ~50ms; on this VPS it hit ~200ms which exceeds
+# the 100ms tick budget. Halving samples + 1 iter brings it under 100ms.
+# Thread cap prevents matmul contention with relay/lepong on the same host.
+ENV SILENT_CEM_SAMPLES=8
+ENV SILENT_CEM_ITERS=1
+ENV SILENT_TORCH_THREADS=2
+ENV OMP_NUM_THREADS=2
+ENV MKL_NUM_THREADS=2
+
 EXPOSE 8801
 
 # Serves the silent demo + WebSocket. All 5 variants wired in.
