@@ -243,6 +243,34 @@ async def ws_endpoint(ws: WebSocket):
     predator = None
     predator_mode = 'oracle'
     ablation = 'none'   # 'none' | 'mute' | 'one_ear' | 'no_beacon'
+
+    # Async planner state: the predator's CEM is too slow on shared vCPUs
+    # to run inside the request-response loop (~200ms vs 100ms tick budget).
+    # Background task continuously plans; WS handler uses whatever action
+    # is most recent. Plan is at most 1 tick stale — fine for hunting since
+    # player movement is bounded.
+    latest_action: list = [0.0, 0.0, 0.0]   # [pdx, pdy, ping]; mutated in place
+    planner_task: asyncio.Task | None = None
+    planner_stop = asyncio.Event()
+
+    async def planner_loop():
+        # Read env + predator from the closure; they get rebound on new_match.
+        # Intentionally read-only on env (CEM only needs current state to plan),
+        # so the WS handler's env.step calls don't conflict beyond rare reads
+        # of mid-step state which produce mostly-coherent plans anyway.
+        while not planner_stop.is_set():
+            if env is None or predator is None or env.done:
+                await asyncio.sleep(0.05)
+                continue
+            try:
+                pdx, pdy, ping = await asyncio.to_thread(predator.act, env)
+                latest_action[0] = float(pdx)
+                latest_action[1] = float(pdy)
+                latest_action[2] = float(ping)
+            except Exception as ex:
+                print(f"[planner] error: {ex}", flush=True)
+                await asyncio.sleep(0.1)
+
     try:
         while True:
             msg_raw = await ws.receive_text()
@@ -287,6 +315,14 @@ async def ws_endpoint(ws: WebSocket):
                     await ws.send_text(json.dumps({'type': 'error', 'error': str(e)}))
                     continue
                 _apply_ablation(env, ablation)
+                # Reset stale plan so the new match's first tick doesn't use
+                # the previous match's last predator action.
+                latest_action[0] = 0.0
+                latest_action[1] = 0.0
+                latest_action[2] = 0.0
+                # Spawn the background planner once we have an env + predator.
+                if planner_task is None:
+                    planner_task = asyncio.create_task(planner_loop())
                 await ws.send_text(json.dumps(_frame_payload(env, predator_mode)))
 
             elif t == 'set_ablation':
@@ -314,10 +350,14 @@ async def ws_endpoint(ws: WebSocket):
                 if not env.done:
                     # Apply the player's action first
                     env.step(np.array([vx, vy, voice], dtype=np.float32), who='player')
-                    # Then the predator's action (same tick)
+                    # Then the predator's action — read whatever the background
+                    # planner has most recently produced. Plan is at most ~1 tick
+                    # stale on slow CPUs, which is fine for hunting.
                     if not env.done:
-                        pdx, pdy, ping = predator.act(env)
-                        env.step(np.array([pdx, pdy, ping], dtype=np.float32), who='predator')
+                        env.step(
+                            np.array([latest_action[0], latest_action[1], latest_action[2]],
+                                     dtype=np.float32),
+                            who='predator')
                 await ws.send_text(json.dumps(_frame_payload(env, predator_mode)))
 
             else:
@@ -325,6 +365,11 @@ async def ws_endpoint(ws: WebSocket):
 
     except WebSocketDisconnect:
         return
+    finally:
+        # Clean up the background planner so it doesn't leak across reconnects.
+        planner_stop.set()
+        if planner_task is not None:
+            planner_task.cancel()
 
 
 _JEPA_CKPT_PATH: str | None = None   # canonical baseline (jepa_v2)

@@ -34,12 +34,10 @@ COPY client/ /app/client/
 ENV SDL_VIDEODRIVER=dummy
 ENV PYTHONUNBUFFERED=1
 
-# CPU tuning for Hetzner CPX21 (4 vCPU shared). Locally on M3 the full CEM
-# (16 samples × 2 iters) hits ~50ms; on this VPS it hit ~200ms which exceeds
-# the 100ms tick budget. Halving samples + 1 iter brings it under 100ms.
-# Thread cap prevents matmul contention with relay/lepong on the same host.
-ENV SILENT_CEM_SAMPLES=8
-ENV SILENT_CEM_ITERS=1
+# CPU thread cap for Hetzner CPX21 (shared 4 vCPU). Prevents matmul thread
+# contention with relay/lepong on the same host. CEM samples/iters left at
+# default (16/2) — game tick rate is now decoupled from planner latency
+# via async background planning, so full CEM quality is fine even at ~200ms.
 ENV SILENT_TORCH_THREADS=2
 ENV OMP_NUM_THREADS=2
 ENV MKL_NUM_THREADS=2
