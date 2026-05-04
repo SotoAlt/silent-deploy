@@ -306,11 +306,7 @@ async def ws_endpoint(ws: WebSocket):
                     env.set_proximity(True)
                 predator_mode = msg.get('predator', 'oracle')
                 try:
-                    predator = make_predator(
-                        predator_mode, seed=seed, jepa_device='cpu',
-                        jepa_ckpt=_JEPA_CKPT_PATH, jepa_head=_JEPA_HEAD_PATH,
-                        jepa_test_ckpts=_JEPA_TEST_CKPTS,
-                    )
+                    predator = await asyncio.to_thread(_get_predator, predator_mode, seed)
                 except ValueError as e:
                     await ws.send_text(json.dumps({'type': 'error', 'error': str(e)}))
                     continue
@@ -320,6 +316,17 @@ async def ws_endpoint(ws: WebSocket):
                 latest_action[0] = 0.0
                 latest_action[1] = 0.0
                 latest_action[2] = 0.0
+                # Warm up: run ONE CEM synchronously so latest_action is
+                # populated before the player sees the first frame. Without
+                # this, predator stands still for the first ~1-2 ticks while
+                # the background planner does its first pass.
+                try:
+                    pdx0, pdy0, ping0 = await asyncio.to_thread(predator.act, env)
+                    latest_action[0] = float(pdx0)
+                    latest_action[1] = float(pdy0)
+                    latest_action[2] = float(ping0)
+                except Exception as ex:
+                    print(f"[warmup] error: {ex}", flush=True)
                 # Spawn the background planner once we have an env + predator.
                 if planner_task is None:
                     planner_task = asyncio.create_task(planner_loop())
@@ -376,6 +383,27 @@ _JEPA_CKPT_PATH: str | None = None   # canonical baseline (jepa_v2)
 _JEPA_HEAD_PATH: str | None = None
 _JEPA_TEST_CKPTS: dict = {}   # name → (ckpt, head); see --jepa-test
 
+# Process-level predator cache. Loading a JEPA checkpoint on CPU is 3-8s
+# (read 100MB ckpt + build ViT + warm up matmul). Cache by predator name
+# so switching variants in the UI is instant after the first load.
+_PREDATOR_CACHE: dict = {}   # name → predator instance
+
+def _get_predator(predator_mode: str, seed: int):
+    cached = _PREDATOR_CACHE.get(predator_mode)
+    if cached is not None:
+        try:
+            cached.reset()
+        except Exception:
+            pass
+        return cached
+    pred = make_predator(
+        predator_mode, seed=seed, jepa_device='cpu',
+        jepa_ckpt=_JEPA_CKPT_PATH, jepa_head=_JEPA_HEAD_PATH,
+        jepa_test_ckpts=_JEPA_TEST_CKPTS,
+    )
+    _PREDATOR_CACHE[predator_mode] = pred
+    return pred
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -403,6 +431,18 @@ def main():
             print(f"  ! ignoring malformed --jepa-test {spec!r}, want NAME:CKPT:HEAD")
     print(f"Silent env server — http://{args.host}:{args.port}/")
     print(f"Levels: {list(LEVELS.keys())}")
+    # Pre-load the canonical (jepa_v2) predator so the first match avoids
+    # the 3-8s checkpoint load. Other variants load lazily on first use,
+    # cached process-wide thereafter.
+    if _JEPA_CKPT_PATH and _JEPA_HEAD_PATH:
+        try:
+            print("[startup] pre-loading canonical predator (jepa_v2)…", flush=True)
+            import time as _t
+            t0 = _t.time()
+            _get_predator('jepa_v2', seed=0)
+            print(f"[startup] canonical loaded in {_t.time()-t0:.1f}s", flush=True)
+        except Exception as ex:
+            print(f"[startup] canonical pre-load failed: {ex}", flush=True)
     uvicorn.run(app, host=args.host, port=args.port, log_level='info')
 
 
