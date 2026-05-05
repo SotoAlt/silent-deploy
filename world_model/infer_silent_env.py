@@ -51,6 +51,66 @@ from dataclasses import replace as _dc_replace
 from envs.silent import Silent, WINDOW_SIZE
 from envs.silent_rooms import LEVELS, get_level
 from envs.silent_predators import make_predator
+from world_model.data_tap import MatchSampler
+from world_model.federation_client import IngestClient
+
+# Federation manifest constants for silent_v1. Must match
+# aura-federated/federated/games/silent_v1/manifest.yaml — these are
+# how the data tap shapes its (emb, actions) blobs for the hub.
+_SILENT_HISTORY = 3
+_SILENT_FRAMESKIP = 5
+_SILENT_ACTION_DIM = 3
+_SILENT_BATCH = 2
+
+_state = {
+    'ingest_client': None,
+}
+
+
+def _silent_encode_obs(obs_list, predator):
+    """list of (4, 64, 50) mel-spec ndarrays -> (T, 192) f32.
+
+    Mirrors silent_jepa_predator._obs_tensor + model.encode. Returns
+    None when the predator isn't a JEPA variant (heuristic predators
+    have no encoder) — sampler drops the frame instead of poisoning
+    the federation pool with garbage.
+    """
+    import torch
+    import torch.nn.functional as F
+    if predator is None or not hasattr(predator, 'model'):
+        return None
+    model = predator.model
+    if model is None:
+        return None
+    dev = next(model.parameters()).device
+    tensors = []
+    for m in obs_list:
+        t = torch.from_numpy(np.asarray(m, dtype=np.float32))
+        t = F.interpolate(t.unsqueeze(0), size=(224, 224),
+                           mode='bilinear', align_corners=False).squeeze(0)
+        tensors.append(t)
+    obs_tensor = torch.stack(tensors, dim=0).unsqueeze(0).to(dev)
+    with torch.no_grad():
+        emb = model.encode(obs_tensor).squeeze(0).cpu().numpy()
+    return emb.astype('float32')
+
+
+def _build_silent_sampler(predator):
+    """Build a MatchSampler for one Silent match. Returns None when
+    federation ingest is disabled (env vars unset) or the predator
+    has no JEPA encoder."""
+    if _state.get('ingest_client') is None:
+        return None
+    if predator is None or not hasattr(predator, 'model') or predator.model is None:
+        return None
+    return MatchSampler(
+        history=_SILENT_HISTORY,
+        frameskip=_SILENT_FRAMESKIP,
+        action_dim=_SILENT_ACTION_DIM,
+        batch_size=_SILENT_BATCH,
+        encoder=lambda obs_list: _silent_encode_obs(obs_list, predator),
+        ingest_client=_state['ingest_client'],
+    )
 
 
 def _randomize_exit(env: Silent, rng: np.random.Generator,
@@ -95,6 +155,20 @@ def _randomize_exit(env: Silent, rng: np.random.Generator,
 
 
 app = FastAPI(title="Silent — Phase 0 Env Server", version="0.1.0")
+
+
+@app.on_event('startup')
+async def _start_federation_ingest():
+    cl = _state.get('ingest_client')
+    if cl is not None:
+        cl.start()
+
+
+@app.on_event('shutdown')
+async def _stop_federation_ingest():
+    cl = _state.get('ingest_client')
+    if cl is not None:
+        await cl.stop(drain_timeout=3.0)
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
@@ -243,6 +317,7 @@ async def ws_endpoint(ws: WebSocket):
     predator = None
     predator_mode = 'oracle'
     ablation = 'none'   # 'none' | 'mute' | 'one_ear' | 'no_beacon'
+    sampler: MatchSampler | None = None    # federation data tap; None = ingest disabled
 
     # Async planner state: the predator's CEM is too slow on shared vCPUs
     # to run inside the request-response loop (~200ms vs 100ms tick budget).
@@ -330,6 +405,12 @@ async def ws_endpoint(ws: WebSocket):
                 # Spawn the background planner once we have an env + predator.
                 if planner_task is None:
                     planner_task = asyncio.create_task(planner_loop())
+                # Federation data tap. Captures (audio_obs, predator_action)
+                # per env-step + encodes through the JEPA predator's model.
+                # No-op when AURA_INGEST_TOKEN unset or predator has no model.
+                sampler = _build_silent_sampler(predator)
+                if sampler is not None:
+                    sampler.push_initial_frame(env.get_audio_obs())
                 await ws.send_text(json.dumps(_frame_payload(env, predator_mode)))
 
             elif t == 'set_ablation':
@@ -345,6 +426,14 @@ async def ws_endpoint(ws: WebSocket):
                 env.reset()
                 if predator is not None:
                     predator.reset()
+                # Flush partial windows from the previous round + reset
+                # the sampler so per-match captures don't bleed across.
+                if sampler is not None:
+                    try: sampler.flush_partial()
+                    except Exception: pass
+                sampler = _build_silent_sampler(predator)
+                if sampler is not None:
+                    sampler.push_initial_frame(env.get_audio_obs())
                 await ws.send_text(json.dumps(_frame_payload(env, predator_mode)))
 
             elif t == 'player_action':
@@ -361,10 +450,20 @@ async def ws_endpoint(ws: WebSocket):
                     # planner has most recently produced. Plan is at most ~1 tick
                     # stale on slow CPUs, which is fine for hunting.
                     if not env.done:
-                        env.step(
-                            np.array([latest_action[0], latest_action[1], latest_action[2]],
-                                     dtype=np.float32),
-                            who='predator')
+                        predator_action = np.array(
+                            [latest_action[0], latest_action[1], latest_action[2]],
+                            dtype=np.float32)
+                        env.step(predator_action, who='predator')
+                        # Federation data tap: pair the predator's action with
+                        # the resulting audio obs. The JEPA models the predator's
+                        # perception, so this is the (action, next_obs) pair the
+                        # training loop expects. who='player' steps don't get
+                        # captured — only predator-perspective transitions.
+                        if sampler is not None:
+                            try:
+                                sampler.push_step(predator_action, env.get_audio_obs())
+                            except Exception:
+                                print('[data_tap] push_step failed', flush=True)
                 await ws.send_text(json.dumps(_frame_payload(env, predator_mode)))
 
             else:
@@ -377,6 +476,9 @@ async def ws_endpoint(ws: WebSocket):
         planner_stop.set()
         if planner_task is not None:
             planner_task.cancel()
+        if sampler is not None:
+            try: sampler.flush_partial()
+            except Exception: pass
 
 
 _JEPA_CKPT_PATH: str | None = None   # canonical baseline (jepa_v2)
@@ -431,6 +533,12 @@ def main():
             print(f"  ! ignoring malformed --jepa-test {spec!r}, want NAME:CKPT:HEAD")
     print(f"Silent env server — http://{args.host}:{args.port}/")
     print(f"Levels: {list(LEVELS.keys())}")
+    _state['ingest_client'] = IngestClient.from_env(game_id='silent_v1')
+    if _state['ingest_client'] is not None:
+        print(f"[silent] federation ingest enabled, "
+              f"hub={_state['ingest_client'].ingest_url}", flush=True)
+    else:
+        print("[silent] federation ingest disabled (env vars unset)", flush=True)
     # Pre-load the canonical (jepa_v2) predator so the first match avoids
     # the 3-8s checkpoint load. Other variants load lazily on first use,
     # cached process-wide thereafter.
