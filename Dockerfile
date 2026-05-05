@@ -24,8 +24,7 @@ RUN pip install --no-cache-dir \
         pymunk==6.9.0 \
         opencv-python-headless \
         fastapi==0.115.6 \
-        uvicorn[standard]==0.34.0 \
-        httpx==0.27.2
+        uvicorn[standard]==0.34.0
 
 COPY world_model/ /app/world_model/
 COPY envs/ /app/envs/

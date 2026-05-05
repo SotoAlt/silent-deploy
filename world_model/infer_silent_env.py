@@ -51,64 +51,14 @@ from dataclasses import replace as _dc_replace
 from envs.silent import Silent, WINDOW_SIZE
 from envs.silent_rooms import LEVELS, get_level
 from envs.silent_predators import make_predator
-from world_model.data_tap import MatchSampler
-from world_model.federation_client import IngestClient
 
-# Federation manifest constants for silent_v1. Must match
-# aura-federated/federated/games/silent_v1/manifest.yaml — these are
-# how the data tap shapes its (emb, actions) blobs for the hub.
-_SILENT_HISTORY = 3
-_SILENT_FRAMESKIP = 5
-_SILENT_ACTION_DIM = 3
-_SILENT_BATCH = 2
-
-_state = {
-    'ingest_client': None,
-}
-
-
-def _silent_encode_obs(obs_list, predator):
-    """obs_list ignored — returns the predator's already-cached embedding
-    for its most recent obs.
-
-    Why we don't re-encode: predator.act() runs model.encode() each tick
-    for its own CEM planning. That same forward pass has already paid
-    the ViT-Tiny cost — re-encoding here doubles the compute on the
-    same shared CPU pool and chokes the game tick budget.
-
-    The data tap pushes 1 frame at a time; the predator's last cached
-    emb corresponds to the last obs the predator saw, which is exactly
-    the obs the data tap is about to capture (push_step is called
-    right after env.step(predator) which is right after predator.act).
-
-    Returns None when no JEPA emb has been computed yet (e.g. on
-    push_initial_frame before any predator.act runs) — sampler skips
-    that frame.
-    """
-    if predator is None or not hasattr(predator, '_last_obs_emb'):
-        return None
-    cached = predator._last_obs_emb
-    if cached is None:
-        return None
-    return np.expand_dims(cached, axis=0)    # (1, 192) — encoder protocol
-
-
-def _build_silent_sampler(predator):
-    """Build a MatchSampler for one Silent match. Returns None when
-    federation ingest is disabled (env vars unset) or the predator
-    has no JEPA encoder."""
-    if _state.get('ingest_client') is None:
-        return None
-    if predator is None or not hasattr(predator, 'model') or predator.model is None:
-        return None
-    return MatchSampler(
-        history=_SILENT_HISTORY,
-        frameskip=_SILENT_FRAMESKIP,
-        action_dim=_SILENT_ACTION_DIM,
-        batch_size=_SILENT_BATCH,
-        encoder=lambda obs_list: _silent_encode_obs(obs_list, predator),
-        ingest_client=_state['ingest_client'],
-    )
+# Federation data tap is intentionally NOT imported. Per-tick model.encode
+# competed with the predator's CEM thread on the shared CPX21 vCPU pool and
+# choked the game loop. Capture stays disabled until an async-encode path
+# lands. See aura-federated/docs/RESEARCH_JOURNAL.md (2026-05-05) for the
+# CPU-contention analysis. Modules world_model/{data_tap,federation_client}.py
+# are still vendored alongside relay-deploy's identical pair for the eventual
+# revival.
 
 
 def _randomize_exit(env: Silent, rng: np.random.Generator,
@@ -153,20 +103,6 @@ def _randomize_exit(env: Silent, rng: np.random.Generator,
 
 
 app = FastAPI(title="Silent — Phase 0 Env Server", version="0.1.0")
-
-
-@app.on_event('startup')
-async def _start_federation_ingest():
-    cl = _state.get('ingest_client')
-    if cl is not None:
-        cl.start()
-
-
-@app.on_event('shutdown')
-async def _stop_federation_ingest():
-    cl = _state.get('ingest_client')
-    if cl is not None:
-        await cl.stop(drain_timeout=3.0)
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
@@ -315,7 +251,6 @@ async def ws_endpoint(ws: WebSocket):
     predator = None
     predator_mode = 'oracle'
     ablation = 'none'   # 'none' | 'mute' | 'one_ear' | 'no_beacon'
-    sampler: MatchSampler | None = None    # federation data tap; None = ingest disabled
 
     # Async planner state: the predator's CEM is too slow on shared vCPUs
     # to run inside the request-response loop (~200ms vs 100ms tick budget).
@@ -403,14 +338,6 @@ async def ws_endpoint(ws: WebSocket):
                 # Spawn the background planner once we have an env + predator.
                 if planner_task is None:
                     planner_task = asyncio.create_task(planner_loop())
-                # Federation data tap is currently DISABLED on silent —
-                # the per-tick encoder pass shared the same CPX21 vCPU pool
-                # as the predator's CEM and choked the tick budget. Keep
-                # the sampler reference None until we ship an async-encode
-                # path that doesn't compete with the planner. Capture is
-                # still live on relay; silent's federation training pool
-                # has its 175 already-captured samples persisted.
-                sampler = None
                 await ws.send_text(json.dumps(_frame_payload(env, predator_mode)))
 
             elif t == 'set_ablation':
@@ -426,10 +353,6 @@ async def ws_endpoint(ws: WebSocket):
                 env.reset()
                 if predator is not None:
                     predator.reset()
-                if sampler is not None:
-                    try: sampler.flush_partial()
-                    except Exception: pass
-                sampler = None    # data tap disabled, see new_match handler
                 await ws.send_text(json.dumps(_frame_payload(env, predator_mode)))
 
             elif t == 'player_action':
@@ -462,9 +385,6 @@ async def ws_endpoint(ws: WebSocket):
         planner_stop.set()
         if planner_task is not None:
             planner_task.cancel()
-        if sampler is not None:
-            try: sampler.flush_partial()
-            except Exception: pass
 
 
 _JEPA_CKPT_PATH: str | None = None   # canonical baseline (jepa_v2)
@@ -519,12 +439,6 @@ def main():
             print(f"  ! ignoring malformed --jepa-test {spec!r}, want NAME:CKPT:HEAD")
     print(f"Silent env server — http://{args.host}:{args.port}/")
     print(f"Levels: {list(LEVELS.keys())}")
-    _state['ingest_client'] = IngestClient.from_env(game_id='silent_v1')
-    if _state['ingest_client'] is not None:
-        print(f"[silent] federation ingest enabled, "
-              f"hub={_state['ingest_client'].ingest_url}", flush=True)
-    else:
-        print("[silent] federation ingest disabled (env vars unset)", flush=True)
     # Pre-load the canonical (jepa_v2) predator so the first match avoids
     # the 3-8s checkpoint load. Other variants load lazily on first use,
     # cached process-wide thereafter.

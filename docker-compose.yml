@@ -9,10 +9,6 @@ services:
       - web
     # Internal only — exposed to the shared "web" network for the
     # caddy proxy. See jepa-vps-proxy/Caddyfile (/silent/* → silent:8801).
-    environment:
-      # Federation ingest (both unset = capture disabled, gameplay loop runs as before).
-      AURA_FEDERATION_URL: ${AURA_FEDERATION_URL:-}
-      AURA_INGEST_TOKEN: ${AURA_INGEST_TOKEN:-}
 
 networks:
   web:
