@@ -121,11 +121,13 @@ class JEPAPredatorV2:
         self._obs_buf: list[np.ndarray] = []
         self._act_buf: list[np.ndarray] = []
         self.tick_count = 0
+        self._last_obs_emb: np.ndarray | None = None    # cached for federation data tap
 
     def reset(self):
         self._obs_buf.clear()
         self._act_buf.clear()
         self.tick_count = 0
+        self._last_obs_emb = None
 
     def _obs_tensor(self, mel_spec_sequence: list[np.ndarray]) -> torch.Tensor:
         out = []
@@ -159,6 +161,9 @@ class JEPAPredatorV2:
         obs_tensor = self._obs_tensor(obs_seq)            # (1, H, 4, 224, 224)
         with torch.no_grad():
             emb_ctx = self.model.encode(obs_tensor)       # (1, H, D)
+        # Federation data-tap reuses this embedding instead of running the
+        # encoder a second time. Cache the most-recent obs's embedding.
+        self._last_obs_emb = emb_ctx[0, -1].detach().cpu().numpy().astype('float32')
 
         # CEM
         mean = torch.zeros(self.action_dim, device=self.device)

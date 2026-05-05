@@ -68,31 +68,29 @@ _state = {
 
 
 def _silent_encode_obs(obs_list, predator):
-    """list of (4, 64, 50) mel-spec ndarrays -> (T, 192) f32.
+    """obs_list ignored — returns the predator's already-cached embedding
+    for its most recent obs.
 
-    Mirrors silent_jepa_predator._obs_tensor + model.encode. Returns
-    None when the predator isn't a JEPA variant (heuristic predators
-    have no encoder) — sampler drops the frame instead of poisoning
-    the federation pool with garbage.
+    Why we don't re-encode: predator.act() runs model.encode() each tick
+    for its own CEM planning. That same forward pass has already paid
+    the ViT-Tiny cost — re-encoding here doubles the compute on the
+    same shared CPU pool and chokes the game tick budget.
+
+    The data tap pushes 1 frame at a time; the predator's last cached
+    emb corresponds to the last obs the predator saw, which is exactly
+    the obs the data tap is about to capture (push_step is called
+    right after env.step(predator) which is right after predator.act).
+
+    Returns None when no JEPA emb has been computed yet (e.g. on
+    push_initial_frame before any predator.act runs) — sampler skips
+    that frame.
     """
-    import torch
-    import torch.nn.functional as F
-    if predator is None or not hasattr(predator, 'model'):
+    if predator is None or not hasattr(predator, '_last_obs_emb'):
         return None
-    model = predator.model
-    if model is None:
+    cached = predator._last_obs_emb
+    if cached is None:
         return None
-    dev = next(model.parameters()).device
-    tensors = []
-    for m in obs_list:
-        t = torch.from_numpy(np.asarray(m, dtype=np.float32))
-        t = F.interpolate(t.unsqueeze(0), size=(224, 224),
-                           mode='bilinear', align_corners=False).squeeze(0)
-        tensors.append(t)
-    obs_tensor = torch.stack(tensors, dim=0).unsqueeze(0).to(dev)
-    with torch.no_grad():
-        emb = model.encode(obs_tensor).squeeze(0).cpu().numpy()
-    return emb.astype('float32')
+    return np.expand_dims(cached, axis=0)    # (1, 192) — encoder protocol
 
 
 def _build_silent_sampler(predator):
@@ -405,12 +403,14 @@ async def ws_endpoint(ws: WebSocket):
                 # Spawn the background planner once we have an env + predator.
                 if planner_task is None:
                     planner_task = asyncio.create_task(planner_loop())
-                # Federation data tap. Captures (audio_obs, predator_action)
-                # per env-step + encodes through the JEPA predator's model.
-                # No-op when AURA_INGEST_TOKEN unset or predator has no model.
-                sampler = _build_silent_sampler(predator)
-                if sampler is not None:
-                    sampler.push_initial_frame(env.get_audio_obs())
+                # Federation data tap is currently DISABLED on silent —
+                # the per-tick encoder pass shared the same CPX21 vCPU pool
+                # as the predator's CEM and choked the tick budget. Keep
+                # the sampler reference None until we ship an async-encode
+                # path that doesn't compete with the planner. Capture is
+                # still live on relay; silent's federation training pool
+                # has its 175 already-captured samples persisted.
+                sampler = None
                 await ws.send_text(json.dumps(_frame_payload(env, predator_mode)))
 
             elif t == 'set_ablation':
@@ -426,14 +426,10 @@ async def ws_endpoint(ws: WebSocket):
                 env.reset()
                 if predator is not None:
                     predator.reset()
-                # Flush partial windows from the previous round + reset
-                # the sampler so per-match captures don't bleed across.
                 if sampler is not None:
                     try: sampler.flush_partial()
                     except Exception: pass
-                sampler = _build_silent_sampler(predator)
-                if sampler is not None:
-                    sampler.push_initial_frame(env.get_audio_obs())
+                sampler = None    # data tap disabled, see new_match handler
                 await ws.send_text(json.dumps(_frame_payload(env, predator_mode)))
 
             elif t == 'player_action':
@@ -454,16 +450,6 @@ async def ws_endpoint(ws: WebSocket):
                             [latest_action[0], latest_action[1], latest_action[2]],
                             dtype=np.float32)
                         env.step(predator_action, who='predator')
-                        # Federation data tap: pair the predator's action with
-                        # the resulting audio obs. The JEPA models the predator's
-                        # perception, so this is the (action, next_obs) pair the
-                        # training loop expects. who='player' steps don't get
-                        # captured — only predator-perspective transitions.
-                        if sampler is not None:
-                            try:
-                                sampler.push_step(predator_action, env.get_audio_obs())
-                            except Exception:
-                                print('[data_tap] push_step failed', flush=True)
                 await ws.send_text(json.dumps(_frame_payload(env, predator_mode)))
 
             else:
