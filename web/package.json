@@ -1,0 +1,14 @@
+{
+  "name": "silent-local",
+  "version": "0.0.1",
+  "description": "In-browser silent demo (parity-tested port of silent-deploy's Python stack).",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "parity": "node parity_harness/run_parity.js",
+    "parity:mel": "node parity_harness/run_parity.js --only=mel"
+  },
+  "devDependencies": {
+    "adm-zip": "0.5.16"
+  }
+}

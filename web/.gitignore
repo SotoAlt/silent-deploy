@@ -1,0 +1,2 @@
+node_modules/
+parity_harness/fixtures/*.npz
