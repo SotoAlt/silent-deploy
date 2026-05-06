@@ -156,9 +156,10 @@ def _encode_frame(frame: np.ndarray) -> str:
     return base64.b64encode(buf.tobytes()).decode('ascii')
 
 
-def _frame_payload(env: Silent, predator_mode: str) -> dict:
+def _frame_payload(env: Silent, predator_mode: str,
+                   include_audio_obs: bool = False) -> dict:
     pixels = env.render(size=512)
-    return {
+    payload: dict = {
         'type': 'frame',
         'frame': _encode_frame(pixels),
         'state': env.get_state().tolist(),
@@ -183,6 +184,16 @@ def _frame_payload(env: Silent, predator_mode: str) -> dict:
         'items_collected': sum(1 for it in env._items if it[2] > 0.5),
         'proximity_active': bool(getattr(env, '_proximity_active', False)),
     }
+    if include_audio_obs:
+        # Send the (4, 64, 50) log-mel obs as base64-encoded float32 so
+        # the in-browser JEPA can run forward + CEM client-side. Cost:
+        # ~51 KB per tick. The server's own JEPA predator is skipped in
+        # client-jepa mode (see /ws handler).
+        obs = env.get_audio_obs()
+        payload['audio_obs_b64'] = base64.b64encode(
+            obs.astype(np.float32, copy=False).tobytes()).decode('ascii')
+        payload['audio_obs_shape'] = list(obs.shape)
+    return payload
 
 
 def _make_survival(env: Silent, time_limit_sec: float = 90.0):
@@ -252,6 +263,20 @@ async def ws_endpoint(ws: WebSocket):
     predator_mode = 'oracle'
     ablation = 'none'   # 'none' | 'mute' | 'one_ear' | 'no_beacon'
 
+    # Client-JEPA mode (?client_jepa=1 on the WS URL):
+    # - server SKIPS its own JEPA predator (no expensive predator.act loop)
+    # - server appends the (4,64,50) audio_obs in every frame payload
+    # - client runs JEPA forward + CEM in-browser, sends predator action
+    #   back as `predator_action: [pdx, pdy, ping]` on each player_action msg
+    # - server applies BOTH player + client-supplied predator actions
+    # Same UI as the canonical silent client; only the JEPA brain moves
+    # to the browser. Round-trip latency stays the same; eliminates the
+    # 150-300ms server-side predator.act CPU cost.
+    client_jepa_mode = ws.query_params.get('client_jepa', '') == '1'
+    if client_jepa_mode:
+        print('[silent] client_jepa mode — server-side predator disabled, '
+              'audio_obs sent each tick', flush=True)
+
     # Async planner state: the predator's CEM is too slow on shared vCPUs
     # to run inside the request-response loop (~200ms vs 100ms tick budget).
     # Background task continuously plans; WS handler uses whatever action
@@ -313,32 +338,39 @@ async def ws_endpoint(ws: WebSocket):
                     env.spawn_items(n=8, rng=np.random.default_rng(seed * 1009 + 71))
                     env.set_proximity(True)
                 predator_mode = msg.get('predator', 'oracle')
-                try:
-                    predator = await asyncio.to_thread(_get_predator, predator_mode, seed)
-                except ValueError as e:
-                    await ws.send_text(json.dumps({'type': 'error', 'error': str(e)}))
-                    continue
+                if client_jepa_mode:
+                    # Client owns the predator. Server doesn't load or run
+                    # any JEPA — saves ~150-300ms of CPU per tick + frees
+                    # the OMP thread pool for env physics. Tag predator_mode
+                    # so the client can sanity-check its variant matches.
+                    predator = None
+                    print(f'[silent] client_jepa: predator_mode tag = {predator_mode}', flush=True)
+                else:
+                    try:
+                        predator = await asyncio.to_thread(_get_predator, predator_mode, seed)
+                    except ValueError as e:
+                        await ws.send_text(json.dumps({'type': 'error', 'error': str(e)}))
+                        continue
                 _apply_ablation(env, ablation)
                 # Reset stale plan so the new match's first tick doesn't use
                 # the previous match's last predator action.
                 latest_action[0] = 0.0
                 latest_action[1] = 0.0
                 latest_action[2] = 0.0
-                # Warm up: run ONE CEM synchronously so latest_action is
-                # populated before the player sees the first frame. Without
-                # this, predator stands still for the first ~1-2 ticks while
-                # the background planner does its first pass.
-                try:
-                    pdx0, pdy0, ping0 = await asyncio.to_thread(predator.act, env)
-                    latest_action[0] = float(pdx0)
-                    latest_action[1] = float(pdy0)
-                    latest_action[2] = float(ping0)
-                except Exception as ex:
-                    print(f"[warmup] error: {ex}", flush=True)
-                # Spawn the background planner once we have an env + predator.
-                if planner_task is None:
-                    planner_task = asyncio.create_task(planner_loop())
-                await ws.send_text(json.dumps(_frame_payload(env, predator_mode)))
+                if not client_jepa_mode:
+                    # Warm up: run ONE CEM synchronously so latest_action is
+                    # populated before the player sees the first frame.
+                    try:
+                        pdx0, pdy0, ping0 = await asyncio.to_thread(predator.act, env)
+                        latest_action[0] = float(pdx0)
+                        latest_action[1] = float(pdy0)
+                        latest_action[2] = float(ping0)
+                    except Exception as ex:
+                        print(f"[warmup] error: {ex}", flush=True)
+                    if planner_task is None:
+                        planner_task = asyncio.create_task(planner_loop())
+                await ws.send_text(json.dumps(
+                    _frame_payload(env, predator_mode, include_audio_obs=client_jepa_mode)))
 
             elif t == 'set_ablation':
                 ablation = msg.get('kind', 'none')
@@ -353,10 +385,11 @@ async def ws_endpoint(ws: WebSocket):
                 env.reset()
                 if predator is not None:
                     predator.reset()
-                await ws.send_text(json.dumps(_frame_payload(env, predator_mode)))
+                await ws.send_text(json.dumps(
+                    _frame_payload(env, predator_mode, include_audio_obs=client_jepa_mode)))
 
             elif t == 'player_action':
-                if env is None or predator is None:
+                if env is None or (predator is None and not client_jepa_mode):
                     await ws.send_text(json.dumps({'type': 'error', 'error': 'no_env'}))
                     continue
                 vx = float(msg.get('vx', 0.0))
@@ -365,15 +398,22 @@ async def ws_endpoint(ws: WebSocket):
                 if not env.done:
                     # Apply the player's action first
                     env.step(np.array([vx, vy, voice], dtype=np.float32), who='player')
-                    # Then the predator's action — read whatever the background
-                    # planner has most recently produced. Plan is at most ~1 tick
-                    # stale on slow CPUs, which is fine for hunting.
                     if not env.done:
-                        predator_action = np.array(
-                            [latest_action[0], latest_action[1], latest_action[2]],
-                            dtype=np.float32)
+                        if client_jepa_mode:
+                            # Client supplies predator_action: [pdx, pdy, ping].
+                            # Default to zeros if missing (e.g. first tick before
+                            # the in-browser model has warmed up).
+                            pa = msg.get('predator_action') or [0.0, 0.0, 0.0]
+                            predator_action = np.array(
+                                [float(pa[0]), float(pa[1]), float(pa[2])],
+                                dtype=np.float32)
+                        else:
+                            predator_action = np.array(
+                                [latest_action[0], latest_action[1], latest_action[2]],
+                                dtype=np.float32)
                         env.step(predator_action, who='predator')
-                await ws.send_text(json.dumps(_frame_payload(env, predator_mode)))
+                await ws.send_text(json.dumps(
+                    _frame_payload(env, predator_mode, include_audio_obs=client_jepa_mode)))
 
             else:
                 await ws.send_text(json.dumps({'type': 'error', 'error': f'unknown_type:{t}'}))
