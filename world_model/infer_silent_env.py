@@ -148,6 +148,50 @@ async def list_levels():
     return {"levels": list(LEVELS.keys())}
 
 
+# ---- silent-local: in-browser JEPA variant -------------------------------
+#
+# The same UI as the canonical client, but the predator's JEPA model loads
+# + runs in the user's browser via TF.js. Server stays env-only (set the
+# WS query ?client_jepa=1 — see ws_endpoint). Weight blob produced by
+# scripts/extract_silent_weights.py is volume-mounted at /app/checkpoints/
+# silent_v1.weights.bin and served raw. Client downloads it once + caches.
+
+_LOCAL_DIR = _ROOT / 'client' / 'silent-local'
+_WEIGHTS_BIN = Path('/app/checkpoints/silent_v1.weights.bin')
+
+
+@app.get("/local/")
+@app.get("/local")
+async def local_root():
+    if _LOCAL_DIR.exists() and (_LOCAL_DIR / 'index.html').exists():
+        return FileResponse(_LOCAL_DIR / 'index.html', headers=_NO_CACHE)
+    return HTMLResponse("silent-local not built yet", status_code=404)
+
+
+@app.get("/local/{filename:path}")
+async def local_static(filename: str):
+    p = _LOCAL_DIR / filename
+    if not p.exists() or not p.is_file():
+        return HTMLResponse(f"not found: {filename}", status_code=404)
+    media = 'application/javascript' if filename.endswith('.js') else None
+    return FileResponse(p, media_type=media, headers=_NO_CACHE)
+
+
+@app.get("/weights.bin")
+async def weights_bin():
+    if not _WEIGHTS_BIN.exists():
+        return HTMLResponse(
+            f"weights not extracted yet at {_WEIGHTS_BIN} — "
+            f"run scripts/extract_silent_weights.py", status_code=404)
+    return FileResponse(
+        _WEIGHTS_BIN,
+        media_type='application/octet-stream',
+        # Long cache — the weights are content-addressed by the path; if
+        # they change we'll rotate the URL.
+        headers={'Cache-Control': 'public, max-age=86400, immutable'},
+    )
+
+
 def _encode_frame(frame: np.ndarray) -> str:
     bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
     ok, buf = cv2.imencode('.png', bgr)
