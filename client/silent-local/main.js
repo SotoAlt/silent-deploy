@@ -18,6 +18,7 @@ const WEIGHTS_URL = (() => {
 })();
 import { JepaPredator } from './jepa.js';
 const jepa = new JepaPredator();
+window._jepa = jepa;   // debug: inspect from devtools
 jepa.init(WEIGHTS_URL).then(() => {
   console.log('[silent-local] JEPA ready');
 }).catch(e => {
