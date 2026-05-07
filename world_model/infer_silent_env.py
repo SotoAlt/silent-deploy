@@ -171,6 +171,15 @@ async def audio_js():
     )
 
 
+@app.get("/train.js")
+async def train_js():
+    return FileResponse(
+        _CLIENT_DIR / "train.js",
+        media_type="application/javascript",
+        headers=_NO_CACHE,
+    )
+
+
 @app.get("/levels")
 async def list_levels():
     return {"levels": list(LEVELS.keys())}
