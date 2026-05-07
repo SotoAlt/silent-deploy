@@ -59,30 +59,58 @@ sys.version
     append(`numpy failed: ${e}`, 'err');
   }
 
-  // Critical test: PyTorch
-  append(`[${((performance.now()-t0)/1000).toFixed(1)}s] Loading torch via micropip...`, 'info');
+  // Try the official "torch" package via Pyodide's loadPackage first
+  // (newer pyodide ships some torch builds directly). Fall back to
+  // micropip if not bundled.
+  append(`[${((performance.now()-t0)/1000).toFixed(1)}s] Trying pyodide.loadPackage('torch')...`, 'info');
   try {
-    await pyodide.loadPackage('micropip');
-    const torchTry = await pyodide.runPythonAsync(`
-import micropip
+    await pyodide.loadPackage('torch');
+    const r = pyodide.runPython(`
+import torch
+x = torch.randn(3, 4)
+y = torch.matmul(x, x.T)
+f"loadPackage OK: torch {torch.__version__}; matmul shape {tuple(y.shape)}; mean {y.mean().item():.4f}"
+`);
+    append(`[${((performance.now()-t0)/1000).toFixed(1)}s] ${r} ✓`, 'ok');
+  } catch (e1) {
+    append(`loadPackage('torch') failed: ${(e1 + '').slice(0, 300)}`, 'err');
+
+    // Fallback: micropip — capture stdout/stderr to surface the real reason.
+    append(`[${((performance.now()-t0)/1000).toFixed(1)}s] Falling back to micropip.install...`, 'info');
+    try {
+      await pyodide.loadPackage('micropip');
+      // Capture all output so we get real errors, not "undefined".
+      const stdoutBuf = [];
+      const stderrBuf = [];
+      pyodide.setStdout({ batched: (s) => stdoutBuf.push(s) });
+      pyodide.setStderr({ batched: (s) => stderrBuf.push(s) });
+      let result;
+      try {
+        result = await pyodide.runPythonAsync(`
+import micropip, traceback
 try:
-    await micropip.install("torch")
+    await micropip.install("torch", keep_going=True)
     import torch
-    msg = f"OK: torch {torch.__version__}"
+    print("micropip OK: torch", torch.__version__)
     x = torch.randn(3, 4)
     y = torch.matmul(x, x.T)
-    msg += f"; matmul shape: {tuple(y.shape)}; mean: {y.mean().item():.4f}"
-    msg
+    print("matmul:", tuple(y.shape), "mean", y.mean().item())
+    "OK"
 except Exception as e:
-    f"FAILED: {type(e).__name__}: {e}"
+    print("EXC:", type(e).__name__, str(e))
+    traceback.print_exc()
+    "FAILED"
 `);
-    if (torchTry.startsWith('OK')) {
-      append(`[${((performance.now()-t0)/1000).toFixed(1)}s] ${torchTry} ✓`, 'ok');
-    } else {
-      append(`[${((performance.now()-t0)/1000).toFixed(1)}s] ${torchTry}`, 'err');
+      } finally {
+        pyodide.setStdout({});
+        pyodide.setStderr({});
+      }
+      append(`micropip result: ${result}`, result === 'OK' ? 'ok' : 'err');
+      if (stdoutBuf.length) append(`stdout:\n${stdoutBuf.join('')}`, 'info');
+      if (stderrBuf.length) append(`stderr:\n${stderrBuf.join('')}`, 'err');
+    } catch (e2) {
+      append(`micropip path crashed: ${(e2 + '').slice(0, 500)}`, 'err');
     }
-  } catch (e) {
-    append(`torch test crashed: ${e}`, 'err');
   }
 
   append(`\nTotal time: ${((performance.now()-t0)/1000).toFixed(1)}s`, 'info');
