@@ -1,0 +1,93 @@
+<!doctype html>
+<html>
+<head>
+<title>Pyodide + PyTorch feasibility test</title>
+<style>
+  body { font-family: ui-monospace, monospace; padding: 24px; background: #1a1a1a; color: #ddd; max-width: 900px; }
+  pre { background: #0a0a0a; padding: 12px; border-left: 3px solid #d99a5f; white-space: pre-wrap; }
+  .ok { color: #5ce388; }
+  .err { color: #ff5b6c; }
+  .info { color: #4fe8d6; }
+  h1 { font-weight: 400; }
+</style>
+</head>
+<body>
+<h1>Pyodide + PyTorch feasibility test</h1>
+<p>Tests whether the silent predator's exact PyTorch code can run in-browser via Pyodide WASM.</p>
+<pre id="log">starting...</pre>
+<script src="https://cdn.jsdelivr.net/pyodide/v0.27.7/full/pyodide.js"></script>
+<script type="module">
+const log = document.getElementById('log');
+const append = (msg, cls = '') => {
+  const span = document.createElement('span');
+  if (cls) span.className = cls;
+  span.textContent = msg + '\n';
+  log.appendChild(span);
+};
+
+async function main() {
+  const t0 = performance.now();
+  append(`[${((performance.now()-t0)/1000).toFixed(1)}s] Loading Pyodide...`, 'info');
+  let pyodide;
+  try {
+    pyodide = await loadPyodide();
+    append(`[${((performance.now()-t0)/1000).toFixed(1)}s] Pyodide loaded ✓`, 'ok');
+  } catch (e) {
+    append(`Pyodide load FAILED: ${e}`, 'err');
+    return;
+  }
+
+  // Test basic Python
+  try {
+    const result = pyodide.runPython(`
+import sys
+sys.version
+`);
+    append(`Python version: ${result}`, 'ok');
+  } catch (e) {
+    append(`Python failed: ${e}`, 'err');
+    return;
+  }
+
+  // Try numpy first (definitely supported)
+  append(`[${((performance.now()-t0)/1000).toFixed(1)}s] Loading numpy...`, 'info');
+  try {
+    await pyodide.loadPackage('numpy');
+    pyodide.runPython('import numpy as np; print(f"numpy {np.__version__}")');
+    append(`[${((performance.now()-t0)/1000).toFixed(1)}s] numpy OK ✓`, 'ok');
+  } catch (e) {
+    append(`numpy failed: ${e}`, 'err');
+  }
+
+  // Critical test: PyTorch
+  append(`[${((performance.now()-t0)/1000).toFixed(1)}s] Loading torch via micropip...`, 'info');
+  try {
+    await pyodide.loadPackage('micropip');
+    const torchTry = await pyodide.runPythonAsync(`
+import micropip
+try:
+    await micropip.install("torch")
+    import torch
+    msg = f"OK: torch {torch.__version__}"
+    x = torch.randn(3, 4)
+    y = torch.matmul(x, x.T)
+    msg += f"; matmul shape: {tuple(y.shape)}; mean: {y.mean().item():.4f}"
+    msg
+except Exception as e:
+    f"FAILED: {type(e).__name__}: {e}"
+`);
+    if (torchTry.startsWith('OK')) {
+      append(`[${((performance.now()-t0)/1000).toFixed(1)}s] ${torchTry} ✓`, 'ok');
+    } else {
+      append(`[${((performance.now()-t0)/1000).toFixed(1)}s] ${torchTry}`, 'err');
+    }
+  } catch (e) {
+    append(`torch test crashed: ${e}`, 'err');
+  }
+
+  append(`\nTotal time: ${((performance.now()-t0)/1000).toFixed(1)}s`, 'info');
+}
+main();
+</script>
+</body>
+</html>

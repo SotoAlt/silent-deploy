@@ -23,6 +23,9 @@ const HISTORY = 3;
 const FRAMESKIP = 5;
 const ACTION_DIM = 3;
 const EMBED_DIM = 192;
+// CEM 16×2 — matches server-side silent_jepa_predator_v2 fidelity.
+// Speed comes from WebGPU backend (3-5× faster than WebGL on M3) +
+// async planning (plan runs off the WS handler so game tick stays 10Hz).
 const N_SAMPLES = 16;
 const N_ITERS = 2;
 const PING_WEIGHT = 30.0;
@@ -43,10 +46,18 @@ export class JepaPredator {
     this.tickCount = 0;
     this.latestAction = [0.0, 0.0, 0.0];
     this.lastDecisionMs = 0;
+    this._planning = false;     // async-plan in-flight guard
   }
 
   async init(weightsUrl) {
     if (typeof tf === 'undefined') throw new Error('TF.js not loaded yet');
+    // Prefer WebGPU on M3 / modern Chrome — 3-5× faster than WebGL for
+    // the predictor forward pass. Fall back to WebGL automatically.
+    try {
+      if (tf.engine().registryFactory && tf.engine().registryFactory['webgpu']) {
+        await tf.setBackend('webgpu');
+      }
+    } catch (e) { /* fallback to default */ }
     await tf.ready();
     console.log('[jepa] TF.js backend:', tf.getBackend());
     console.log('[jepa] fetching', weightsUrl);
@@ -67,6 +78,11 @@ export class JepaPredator {
 
   // Decode base64 audio_obs string → Float32Array (4*64*50).
   // Caller passes shape from the server; we sanity check it.
+  // Plan runs async — WS handler returns immediately. The send loop reads
+  // whatever latestAction is current. Mirrors the OG silent server's
+  // background-planner pattern (CLAUDE.md: "Async background planner:
+  // decouple game tick from CEM latency"). Without this, plan blocks the
+  // main thread for ~160ms, capping the loop at ~3.8 Hz instead of 10 Hz.
   onObs(b64, shape) {
     if (!this.ready) return;
     if (!Array.isArray(shape) || shape[0] !== 4 || shape[1] !== 64 || shape[2] !== 50) {
@@ -85,14 +101,26 @@ export class JepaPredator {
     this.obsBuf.push(arr);
     if (this.obsBuf.length > HISTORY + 1) this.obsBuf.shift();
     this.tickCount++;
-
     if (this.obsBuf.length < HISTORY) return;     // still warming up
 
+    // Don't kick off a new plan if one is in flight — drop this obs's
+    // chance to plan. The next obs that lands while idle will use the
+    // most recent obsBuf, which is what we want.
+    if (this._planning) return;
+    this._planning = true;
+    // Defer to the next macrotask so the WS onmessage handler can return
+    // first; UI re-renders aren't starved by the long compute.
+    setTimeout(() => this._runPlan(), 0);
+  }
+
+  _runPlan() {
     const t0 = performance.now();
     try {
       this.latestAction = this._planOneTick();
     } catch (e) {
       console.error('[jepa] plan failed:', e);
+    } finally {
+      this._planning = false;
     }
     this.lastDecisionMs = performance.now() - t0;
 
@@ -227,6 +255,10 @@ export class JepaPredator {
   // State head: Sequential(Linear(192,256), GELU, Linear(256,256), GELU,
   // Linear(256, 10)). Matches the head ckpt key layout fc0/fc1/fc2.
   // PyTorch nn.Linear stores W as (out, in); we transpose to feed matMul.
+  // The head was trained on Y-standardized targets; we unnormalize back to
+  // env state space [-1, 1] via state_mean / state_std (Y_mu / Y_sig in
+  // the head ckpt). Without this, CEM optimizes a meaningless cost and the
+  // predator wanders aimlessly.
   _stateHeadForward(emb) {
     const w0 = this.weights.get('state_head.fc0.weight');
     const b0 = this.weights.get('state_head.fc0.bias');
@@ -234,22 +266,29 @@ export class JepaPredator {
     const b1 = this.weights.get('state_head.fc1.bias');
     const w2 = this.weights.get('state_head.fc2.weight');
     const b2 = this.weights.get('state_head.fc2.bias');
+    const mean = this.weights.get('state_mean');   // (1, 10) — Y_mu
+    const std  = this.weights.get('state_std');    // (1, 10) — Y_sig
     if (!w0) throw new Error('state_head weights missing');
     let x = tf.add(tf.matMul(emb, tf.transpose(w0)), b0);    // (B, 256)
     x = _gelu(x);
     x = tf.add(tf.matMul(x, tf.transpose(w1)), b1);          // (B, 256)
     x = _gelu(x);
-    x = tf.add(tf.matMul(x, tf.transpose(w2)), b2);          // (B, 10)
+    x = tf.add(tf.matMul(x, tf.transpose(w2)), b2);          // (B, 10) y_norm
+    if (mean && std) {
+      x = tf.add(tf.mul(x, std), mean);                      // → state ∈ [-1, 1]
+    }
     return x;
   }
 }
 
-// Approximate GELU: x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-// matches PyTorch's nn.GELU(approximate='none') closely enough for our use.
+// Exact GELU matching PyTorch nn.GELU(approximate='none'):
+//   gelu(x) = 0.5 * x * (1 + erf(x / sqrt(2)))
+// The tanh-approx form differs by ~1e-4 per op; stacked across 6
+// transformer layers and the projector + pred_proj that drift compounds
+// and was a likely source of the predator-quality gap vs the PyTorch
+// reference (silent_jepa_predator_v2). TF.js exposes tf.erf since 4.x.
 function _gelu(x) {
-  const c = Math.sqrt(2 / Math.PI);
-  return tf.mul(
-    tf.mul(x, 0.5),
-    tf.add(1, tf.tanh(tf.mul(c, tf.add(x, tf.mul(tf.pow(x, 3), 0.044715)))))
-  );
+  const SQRT_2 = Math.SQRT2;
+  return tf.mul(tf.mul(x, 0.5),
+                tf.add(1, tf.erf(tf.div(x, SQRT_2))));
 }

@@ -157,7 +157,14 @@ async def list_levels():
 # silent_v1.weights.bin and served raw. Client downloads it once + caches.
 
 _LOCAL_DIR = _ROOT / 'client' / 'silent-local'
-_WEIGHTS_BIN = Path('/app/checkpoints/silent_v1.weights.bin')
+# Container path first, then a local-dev fallback so we can run the
+# server on the M3 directly (`python -m world_model.infer_silent_env`).
+_WEIGHTS_BIN_CANDIDATES = [
+    Path('/app/checkpoints/silent_v1.weights.bin'),
+    _ROOT / 'checkpoints' / 'silent_v1.weights.bin',
+]
+_WEIGHTS_BIN = next((p for p in _WEIGHTS_BIN_CANDIDATES if p.exists()),
+                   _WEIGHTS_BIN_CANDIDATES[0])
 
 
 @app.get("/local/")

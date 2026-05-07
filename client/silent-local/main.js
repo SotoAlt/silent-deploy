@@ -8,12 +8,18 @@ console.log('[silent-local] build =', BUILD_TAG);
 
 // Connects to /silent/ws (or /ws in dev) with ?client_jepa=1 so the
 // server knows to skip its own JEPA predator + send us audio_obs.
+// When this demo is inlined into sotoalt.dev (cross-origin), point WS +
+// weights at the absolute jepa.waweapps.win endpoints — same hostname
+// detection pattern as relay.html.
+const _IS_SOTOALT = location.hostname === 'sotoalt.dev';
 const WS_URL = (() => {
+  if (_IS_SOTOALT) return 'wss://jepa.waweapps.win/silent/ws?client_jepa=1';
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const path  = location.pathname.includes('/silent/') ? '/silent/ws' : '/ws';
   return proto + '//' + location.host + path + '?client_jepa=1';
 })();
 const WEIGHTS_URL = (() => {
+  if (_IS_SOTOALT) return 'https://jepa.waweapps.win/silent/weights.bin';
   return location.pathname.includes('/silent/') ? '/silent/weights.bin' : '/weights.bin';
 })();
 import { JepaPredator } from './jepa.js';
@@ -254,6 +260,15 @@ function handleServer(msg) {
   if (msg.type === 'error') { console.warn('server error', msg.error); return; }
   if (msg.type !== 'frame') return;
 
+  if (window._dbg) {
+    window._dbg.recvs.push({
+      t: Date.now(),
+      predator_pos: msg.predator_pos,
+      player_pos: msg.player_pos,
+      tick: msg.tick,
+    });
+    if (window._dbg.recvs.length > 20) window._dbg.recvs.shift();
+  }
   state.lastPayload = msg;
   el.frame.src = 'data:image/png;base64,' + msg.frame;
 
@@ -382,17 +397,21 @@ function computePlayerAction() {
 
 // 10 Hz tick — matches server CONTROL_HZ
 let tickTimer = null;
+window._dbg = { sends: [], recvs: [], state };   // debug — read from devtools
 function startTickLoop() {
   if (tickTimer !== null) return;
   tickTimer = setInterval(() => {
     if (!state.connected || state.done) return;
     const a = computePlayerAction();
     const predAct = jepa.getLatestAction();
-    send({
+    const payload = {
       type: 'player_action',
       vx: a.vx, vy: a.vy, voice_amp: a.voice_amp,
       predator_action: predAct,   // [pdx, pdy, ping] in [-1..1]^2 × [0..1]
-    });
+    };
+    window._dbg.sends.push({ t: Date.now(), predAct, vx: a.vx, vy: a.vy });
+    if (window._dbg.sends.length > 20) window._dbg.sends.shift();
+    send(payload);
   }, 100);
 }
 
