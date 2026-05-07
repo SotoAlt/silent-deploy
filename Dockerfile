@@ -1,6 +1,6 @@
 # silent inference server — JEPA predator that hunts by audio.
-# CPU-only PyTorch + FastAPI WebSocket. 5 selectable variants:
-# 3E ep30 (canonical), JEPA (og baseline), 3F ep40/45/50.
+# CPU-only PyTorch + FastAPI WebSocket. Three selectable variants:
+# canonical (3E ep30), baseline (JEPA og), federation (3F ep50).
 FROM python:3.10-slim
 
 WORKDIR /app
@@ -45,12 +45,15 @@ ENV MKL_NUM_THREADS=2
 
 EXPOSE 8801
 
-# Serves the silent demo + WebSocket. All 5 variants wired in.
+# Serves the silent demo + WebSocket. Three variants exposed in the UI:
+# - canonical (3E ep30): the current ship — beacon-free, joint-trained.
+# - baseline (JEPA og): pre-3E, beacon-trained — kept as the "before" A/B.
+# - federation (3F ep50): continuation training from 3E ep30 — first
+#   model retrained on federation-pool data. Selected from the 3F sweep
+#   as the strongest probe-fit candidate.
 CMD ["python", "-m", "world_model.infer_silent_env", \
      "--host", "0.0.0.0", "--port", "8801", \
      "--jepa-ckpt",   "/app/checkpoints/silent_v1_3e_ep030.pt", \
      "--jepa-head",   "/app/checkpoints/3e_ep030_head_uniform.pt", \
      "--jepa-test",   "jepa_baseline:/app/checkpoints/silent_BASELINE_ep010_joint.pt:/app/checkpoints/silent_BASELINE_head_uniform.pt", \
-     "--jepa-test",   "jepa_test1:/app/checkpoints/silent_v1_3f_ep010.pt:/app/checkpoints/3f_ep010_head_uniform.pt", \
-     "--jepa-test",   "jepa_test2:/app/checkpoints/silent_v1_3f_ep015.pt:/app/checkpoints/3f_ep015_head_uniform.pt", \
      "--jepa-test",   "jepa_test3:/app/checkpoints/silent_v1_3f_ep020.pt:/app/checkpoints/3f_ep020_head_uniform.pt"]
