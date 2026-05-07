@@ -146,6 +146,12 @@ const el = {
   // toggle groups
   modeBtns:  document.querySelectorAll('.mode-btn'),
   mapBtns:   document.querySelectorAll('.map-btn'),
+
+  // federation panel
+  fedTrainBtn: $('fed-train-btn'),
+  fedStatus:   $('fed-status'),
+  fedRounds:   $('fed-rounds'),
+  fedVal:      $('fed-val'),
 };
 
 // Audio: on/off flag. AudioContext is created lazily on first user gesture.
@@ -506,6 +512,49 @@ window.addEventListener('keyup', (e) => {
 if (el.muteBtn) el.muteBtn.addEventListener('click', () => { unlockAudio(); setAudioEnabled(!audioEnabled); });
 el.helpBtn.addEventListener('click', unlockAudio);
 document.addEventListener('click', unlockAudio, { once: false });
+
+// ---- federation: one-shot training round ------------------------------
+// Click "🧠 train round" → browser pulls latest predictor weights from
+// the hub, fetches a training batch (audio embeddings pre-encoded
+// server-side), runs K SGD steps locally, uploads the signSGD delta.
+// Hub aggregates across clients per round and broadcasts the new
+// weights. NO compute happens on our servers — gameplay grows the
+// pool, the user's browser does the math. Phase 1 is one round per
+// click (post-match); Phase 2 will move SGD into a Web Worker so it
+// can run concurrently with gameplay.
+let fedRoundsContributed = 0;
+function setFedStatus(text, kind) {
+  if (!el.fedStatus) return;
+  el.fedStatus.textContent = text;
+  el.fedStatus.classList.remove('train', 'done', 'err');
+  if (kind) el.fedStatus.classList.add(kind);
+}
+if (el.fedTrainBtn && window.SilentFedTrain) {
+  el.fedTrainBtn.addEventListener('click', async () => {
+    el.fedTrainBtn.disabled = true;
+    setFedStatus('starting...', 'train');
+    try {
+      const result = await window.SilentFedTrain.runOneRound({
+        onStatus: (s) => setFedStatus(s, 'train'),
+        onLog: (msg, kind) => console.log('[fed]', msg, kind || ''),
+      });
+      const accepted = result.accepted !== false;
+      fedRoundsContributed += 1;
+      el.fedRounds.textContent = fedRoundsContributed;
+      el.fedVal.textContent = result.val_loss.toFixed(4);
+      setFedStatus(
+        (accepted ? '✓ round ' : '✗ rejected ') + result.round_id +
+        ' · val=' + result.val_loss.toFixed(4),
+        accepted ? 'done' : 'err'
+      );
+    } catch (e) {
+      console.error('[fed]', e);
+      setFedStatus('error: ' + (e.message || e), 'err');
+    } finally {
+      el.fedTrainBtn.disabled = false;
+    }
+  });
+}
 
 // ---- boot -------------------------------------------------------------
 buildLevelNav();

@@ -449,6 +449,60 @@
     background: var(--teal-faint);
   }
 
+  /* -- federation training panel ---------------------------------------- */
+  /* Anchored in the right rail. Click "🧠 train round" → browser-side
+     SGD on the predictor, weights aggregated by the hub. Status text
+     and a small log surface progress. Server only ships data — no
+     game-server CPU is spent on training. */
+  .fed-panel { display: flex; flex-direction: column; gap: 8px; }
+  .fed-btn {
+    background: transparent;
+    border: 1px solid var(--edge);
+    color: var(--ink-dim);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    padding: 10px 12px;
+    cursor: pointer;
+    transition: all 0.18s;
+  }
+  .fed-btn:hover:not(:disabled) {
+    color: var(--coral);
+    border-color: var(--coral);
+  }
+  .fed-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .fed-status {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    color: var(--ink-faint);
+    line-height: 1.4;
+    min-height: 1.4em;
+  }
+  .fed-status.train { color: var(--coral); }
+  .fed-status.done { color: var(--teal); }
+  .fed-status.err { color: #ff6b6b; }
+  .fed-stat-row {
+    display: flex; justify-content: space-between;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    color: var(--ink-dim);
+  }
+  .fed-stat-row .val { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .fed-link {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    text-decoration: none;
+    border-top: 1px solid var(--edge);
+    padding-top: 8px;
+  }
+  .fed-link:hover { color: var(--teal); }
+
   /* -- footer console --------------------------------------------------- */
   .console {
     grid-column: 1 / -1; grid-row: 3;
@@ -635,6 +689,15 @@
       <div>R · replay</div>
       <div>L · next level</div>
     </div>
+
+    <h3>Federation</h3>
+    <div class="hud-card fed-panel">
+      <button class="fed-btn" id="fed-train-btn">🧠 train round</button>
+      <div class="fed-status" id="fed-status">idle — gameplay feeds the pool</div>
+      <div class="fed-stat-row"><span>rounds contributed</span><span class="val" id="fed-rounds">0</span></div>
+      <div class="fed-stat-row"><span>last val_loss</span><span class="val" id="fed-val">—</span></div>
+      <a class="fed-link" href="https://jepa.waweapps.win/federated/admin" target="_blank" rel="noopener">view hub →</a>
+    </div>
   </aside>
 
   <div class="console">
@@ -662,6 +725,7 @@
 
 <!-- Relative paths so this works behind Caddy /silent/* prefix as well as locally. -->
 <script src="audio.js"></script>
+<script src="train.js"></script>
 <script src="main.js"></script>
 
 </body>
