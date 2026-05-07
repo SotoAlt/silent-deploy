@@ -32,6 +32,23 @@ logger = logging.getLogger(__name__)
 FrameEncoder = Callable[[List[np.ndarray]], Optional[np.ndarray]]
 
 
+def _normalize_emb_to_1d(emb: np.ndarray) -> Optional[np.ndarray]:
+    """Coerce an embedding to a 1-D float32 array. Accepts (D,) or
+    (1, D); returns None on shape mismatch (caller drops the push)."""
+    arr = np.asarray(emb, dtype=np.float32)
+    if arr.ndim == 2:
+        if arr.shape[0] != 1:
+            logger.warning("data_tap: emb has %d rows, expected 1",
+                            arr.shape[0])
+            return None
+        return arr[0]
+    if arr.ndim == 1:
+        return arr
+    logger.warning("data_tap: emb shape %s — expected (D,) or (1, D)",
+                    arr.shape)
+    return None
+
+
 class MatchSampler:
     """Rolling-window sample builder for one match session.
 
@@ -93,62 +110,43 @@ class MatchSampler:
         self._maybe_emit_window()
 
     def push_step(self, thrust: np.ndarray, frame: np.ndarray) -> None:
-        thrust = np.asarray(thrust, dtype=np.float32).reshape(-1)
-        if thrust.shape != (self.action_dim,):
-            raise ValueError(
-                f"thrust shape {thrust.shape} != ({self.action_dim},)")
-        slot = np.tile(thrust, self.frameskip).astype(np.float32, copy=False)
+        slot = self._tile_action(thrust)
         if not self._encode_and_buffer(frame):
             return
         self._actions.append(slot)
         self.n_pushes += 1
         self._maybe_emit_window()
 
-    # ---- Cached-embedding path -------------------------------------
-    # For games where the predator already runs an encoder per tick
-    # (silent's CEM planner), the data tap can reuse the existing
-    # forward pass instead of paying for a second encode. The caller
-    # supplies a (1, embed_dim) array per push; window/batch logic is
-    # identical to the frame-based path. Encoder may be None in this
-    # mode.
+    # ---- Cached-embedding path: reuse the predator's existing encoder
+    # forward instead of paying for a second encode. silent uses this;
+    # relay still uses the frame-based path above.
 
     def push_initial_emb(self, emb: np.ndarray) -> None:
-        """Variant of push_initial_frame that takes a pre-encoded
-        embedding instead of a raw frame. emb shape: (1, embed_dim) or
-        (embed_dim,)."""
         if not self._buffer_emb(emb):
             return
         self.n_pushes += 1
         self._maybe_emit_window()
 
     def push_step_emb(self, thrust: np.ndarray, emb: np.ndarray) -> None:
-        """Variant of push_step that takes a pre-encoded embedding.
-        See push_initial_emb. `thrust` is the action_dim vector for the
-        timestep — gets tiled by frameskip to match the wire format."""
-        thrust = np.asarray(thrust, dtype=np.float32).reshape(-1)
-        if thrust.shape != (self.action_dim,):
-            raise ValueError(
-                f"thrust shape {thrust.shape} != ({self.action_dim},)")
-        slot = np.tile(thrust, self.frameskip).astype(np.float32, copy=False)
+        slot = self._tile_action(thrust)
         if not self._buffer_emb(emb):
             return
         self._actions.append(slot)
         self.n_pushes += 1
         self._maybe_emit_window()
 
+    def _tile_action(self, thrust: np.ndarray) -> np.ndarray:
+        thrust = np.asarray(thrust, dtype=np.float32).reshape(-1)
+        if thrust.shape != (self.action_dim,):
+            raise ValueError(
+                f"thrust shape {thrust.shape} != ({self.action_dim},)")
+        return np.tile(thrust, self.frameskip).astype(np.float32, copy=False)
+
     def _buffer_emb(self, emb: np.ndarray) -> bool:
-        emb = np.asarray(emb, dtype=np.float32)
-        if emb.ndim == 2:
-            if emb.shape[0] != 1:
-                logger.warning("data_tap: emb has %d rows, expected 1",
-                                emb.shape[0])
-                return False
-            emb = emb[0]
-        if emb.ndim != 1:
-            logger.warning("data_tap: emb shape %s — expected (D,) or (1, D)",
-                            emb.shape)
+        flat = _normalize_emb_to_1d(emb)
+        if flat is None:
             return False
-        self._embs.append(emb)
+        self._embs.append(flat)
         return True
 
     def _encode_and_buffer(self, frame: np.ndarray) -> bool:
@@ -159,13 +157,7 @@ class MatchSampler:
             return False
         if emb is None:
             return False
-        emb = np.asarray(emb, dtype=np.float32)
-        if emb.shape[0] != 1:
-            logger.warning("data_tap: encoder returned %d embs for 1 frame",
-                            emb.shape[0])
-            return False
-        self._embs.append(emb[0])
-        return True
+        return self._buffer_emb(emb)
 
     def _maybe_emit_window(self) -> None:
         if len(self._embs) < self.window_size:
