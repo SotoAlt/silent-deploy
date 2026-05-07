@@ -18,9 +18,14 @@ const WS_URL = (() => {
   const path  = location.pathname.includes('/silent/') ? '/silent/ws' : '/ws';
   return proto + '//' + location.host + path + '?client_jepa=1';
 })();
+// Version-suffix the URL so cache busts when the blob format changes.
+// fp16 -> fp32 swap on 2026-05-07 left users with cached 53 MB fp16
+// blob; bumping ?v= forces a fresh fetch even with immutable cache.
+const _WEIGHTS_VER = 'v=fp32';
 const WEIGHTS_URL = (() => {
-  if (_IS_SOTOALT) return 'https://jepa.waweapps.win/silent/weights.bin';
-  return location.pathname.includes('/silent/') ? '/silent/weights.bin' : '/weights.bin';
+  if (_IS_SOTOALT) return `https://jepa.waweapps.win/silent/weights.bin?${_WEIGHTS_VER}`;
+  const base = location.pathname.includes('/silent/') ? '/silent/weights.bin' : '/weights.bin';
+  return `${base}?${_WEIGHTS_VER}`;
 })();
 import { JepaPredator } from './jepa.js';
 const jepa = new JepaPredator();
