@@ -52,13 +52,25 @@ from envs.silent import Silent, WINDOW_SIZE
 from envs.silent_rooms import LEVELS, get_level
 from envs.silent_predators import make_predator
 
-# Federation data tap is intentionally NOT imported. Per-tick model.encode
-# competed with the predator's CEM thread on the shared CPX21 vCPU pool and
-# choked the game loop. Capture stays disabled until an async-encode path
-# lands. See aura-federated/docs/RESEARCH_JOURNAL.md (2026-05-05) for the
-# CPU-contention analysis. Modules world_model/{data_tap,federation_client}.py
-# are still vendored alongside relay-deploy's identical pair for the eventual
-# revival.
+# Federation data tap — REVIVED 2026-05-07.
+# Earlier disabled (commit e740976) because per-tick `model.encode` on the
+# WS handler choked gameplay on shared CPX21 vCPU. New architecture
+# piggybacks on the predator's existing forward pass: the encoder runs
+# once per planner tick INSIDE predator.act() for CEM, and we cache the
+# resulting `emb_ctx[:, -1]` on the predator object. The data tap reads
+# that cached embedding instead of re-encoding. Zero extra CPU.
+# - Capture rate matches planner cadence (~3-5 Hz), not WS tick (10 Hz).
+# - Tap fires from `planner_loop` task, not the WS handler — even if it
+#   briefly blocks (it shouldn't — just numpy + queue.put_nowait), it
+#   doesn't stall the game tick.
+# - On/off via env vars. AURA_FEDERATION_URL + AURA_INGEST_TOKEN unset →
+#   ingest_client is None → no sampler created → planner hook is no-op.
+from world_model.data_tap import MatchSampler
+from world_model.federation_client import IngestClient
+
+# Module-level ingest client. Created at app startup (after the asyncio
+# loop is running) so its background worker can be started cleanly.
+_INGEST_CLIENT: IngestClient | None = None
 
 
 def _randomize_exit(env: Silent, rng: np.random.Generator,
@@ -106,6 +118,25 @@ app = FastAPI(title="Silent — Phase 0 Env Server", version="0.1.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def _start_ingest_client() -> None:
+    global _INGEST_CLIENT
+    _INGEST_CLIENT = IngestClient.from_env(game_id='silent_v1')
+    if _INGEST_CLIENT is not None:
+        _INGEST_CLIENT.start()
+        print(f"[silent] federation tap enabled → "
+              f"{_INGEST_CLIENT.base_url}/games/silent_v1/ingest", flush=True)
+    else:
+        print("[silent] federation tap disabled (no AURA_FEDERATION_URL "
+              "+ AURA_INGEST_TOKEN env vars)", flush=True)
+
+
+@app.on_event("shutdown")
+async def _stop_ingest_client() -> None:
+    if _INGEST_CLIENT is not None:
+        await _INGEST_CLIENT.stop()
 
 _CLIENT_DIR = _ROOT / 'client' / 'silent'
 app.mount("/static", StaticFiles(directory=str(_CLIENT_DIR)), name="static")
@@ -337,11 +368,17 @@ async def ws_endpoint(ws: WebSocket):
     planner_task: asyncio.Task | None = None
     planner_stop = asyncio.Event()
 
+    # Federation data tap state. `sampler` is rebuilt on new_match; the
+    # planner_loop hook below reads `predator._last_emb_ctx` after each
+    # successful act() and pushes (action, emb) pairs into the sampler.
+    sampler: MatchSampler | None = None
+
     async def planner_loop():
         # Read env + predator from the closure; they get rebound on new_match.
         # Intentionally read-only on env (CEM only needs current state to plan),
         # so the WS handler's env.step calls don't conflict beyond rare reads
         # of mid-step state which produce mostly-coherent plans anyway.
+        nonlocal sampler
         while not planner_stop.is_set():
             if env is None or predator is None or env.done:
                 await asyncio.sleep(0.05)
@@ -351,6 +388,43 @@ async def ws_endpoint(ws: WebSocket):
                 latest_action[0] = float(pdx)
                 latest_action[1] = float(pdy)
                 latest_action[2] = float(ping)
+                # Federation tap: piggyback on the encoder forward we just
+                # ran. predator._last_emb_ctx is the projected embedding for
+                # the most recent obs (cached inside act()). It's None for
+                # the first ~`history` ticks while obs_buf fills, then
+                # becomes populated. Build the sampler lazily on the first
+                # populated emb so we capture from the very first valid
+                # forward pass.
+                emb = getattr(predator, '_last_emb_ctx', None)
+                if emb is None:
+                    continue
+                if sampler is None and _INGEST_CLIENT is not None:
+                    try:
+                        sampler = MatchSampler(
+                            history=predator.history,
+                            frameskip=predator.frameskip,
+                            action_dim=predator.action_dim,
+                            # Hub-side manifest expects batch_size=2 for
+                            # silent_v1 — must match registration.
+                            batch_size=2,
+                            encoder=None,           # cached-emb path
+                            ingest_client=_INGEST_CLIENT,
+                        )
+                        sampler.push_initial_emb(emb.cpu().numpy())
+                        print(f"[tap] sampler armed for silent_v1 "
+                              f"(history={predator.history}, "
+                              f"frameskip={predator.frameskip})", flush=True)
+                    except Exception as ex:
+                        print(f"[tap] init error: {ex}", flush=True)
+                        sampler = None
+                if sampler is not None:
+                    try:
+                        emb_np = emb.cpu().numpy()  # (1, D)
+                        action_vec = np.array([pdx, pdy, ping], dtype=np.float32)
+                        sampler.push_step_emb(action_vec, emb_np)
+                    except Exception as ex:
+                        # Tap failures are never fatal to gameplay.
+                        print(f"[tap] push_step_emb error: {ex}", flush=True)
             except Exception as ex:
                 print(f"[planner] error: {ex}", flush=True)
                 await asyncio.sleep(0.1)
@@ -411,6 +485,11 @@ async def ws_endpoint(ws: WebSocket):
                 if not client_jepa_mode:
                     # Warm up: run ONE CEM synchronously so latest_action is
                     # populated before the player sees the first frame.
+                    # Note: on the very first call _last_emb_ctx is still
+                    # None because predator.act needs `history` buffered obs
+                    # to encode. The federation sampler is built lazily by
+                    # planner_loop on the first tick where _last_emb_ctx
+                    # becomes populated.
                     try:
                         pdx0, pdy0, ping0 = await asyncio.to_thread(predator.act, env)
                         latest_action[0] = float(pdx0)
@@ -420,6 +499,9 @@ async def ws_endpoint(ws: WebSocket):
                         print(f"[warmup] error: {ex}", flush=True)
                     if planner_task is None:
                         planner_task = asyncio.create_task(planner_loop())
+                    # New match → fresh sampler; planner_loop will rebuild
+                    # on the first valid emb_ctx.
+                    sampler = None
                 await ws.send_text(json.dumps(
                     _frame_payload(env, predator_mode, include_audio_obs=client_jepa_mode)))
 
@@ -436,6 +518,17 @@ async def ws_endpoint(ws: WebSocket):
                 env.reset()
                 if predator is not None:
                     predator.reset()
+                # Drop the sampler. Its buffered embeddings are from the
+                # pre-reset trajectory and won't connect cleanly to the
+                # new initial state. Replay flows in the silent client go
+                # through new_match (not reset) per main.js, so this is a
+                # legacy/safety branch.
+                if sampler is not None:
+                    try:
+                        sampler.flush_partial()
+                    except Exception:
+                        pass
+                    sampler = None
                 await ws.send_text(json.dumps(
                     _frame_payload(env, predator_mode, include_audio_obs=client_jepa_mode)))
 
@@ -476,6 +569,16 @@ async def ws_endpoint(ws: WebSocket):
         planner_stop.set()
         if planner_task is not None:
             planner_task.cancel()
+        # Flush any partial federation window so trailing data isn't lost
+        # at disconnect. Bounded by sampler.batch_size; safe to skip if no
+        # tap is active.
+        if sampler is not None:
+            try:
+                sampler.flush_partial()
+                stats = sampler.stats()
+                print(f"[tap] match end: {stats}", flush=True)
+            except Exception as ex:
+                print(f"[tap] flush_partial error: {ex}", flush=True)
 
 
 _JEPA_CKPT_PATH: str | None = None   # canonical baseline (jepa_v2)

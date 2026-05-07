@@ -7,6 +7,13 @@ services:
       - ./checkpoints:/app/checkpoints:ro
     networks:
       - web
+    environment:
+      # Federation data tap (revived 2026-05-07). Set both vars to enable
+      # capture of (predator_action, projected_emb) pairs into the
+      # silent_v1 federation pool. Unset → tap is a no-op, no extra CPU.
+      # See world_model/infer_silent_env.py for the wire path.
+      - AURA_FEDERATION_URL=${AURA_FEDERATION_URL:-}
+      - AURA_INGEST_TOKEN=${AURA_INGEST_TOKEN:-}
     # Internal only — exposed to the shared "web" network for the
     # caddy proxy. See jepa-vps-proxy/Caddyfile (/silent/* → silent:8801).
 

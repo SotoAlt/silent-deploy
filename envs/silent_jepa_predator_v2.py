@@ -121,11 +121,19 @@ class JEPAPredatorV2:
         self._obs_buf: list[np.ndarray] = []
         self._act_buf: list[np.ndarray] = []
         self.tick_count = 0
+        # Cache of the last forward pass's context embedding (last
+        # timestep, projected) so the federation data tap can reuse it
+        # instead of re-encoding inside the WS handler. The duplicate
+        # encode was what choked gameplay in the disabled tap (see
+        # silent-deploy commit e740976). Zero extra cost: this is just
+        # a detached pointer to the tensor we already produced for CEM.
+        self._last_emb_ctx: Optional[torch.Tensor] = None
 
     def reset(self):
         self._obs_buf.clear()
         self._act_buf.clear()
         self.tick_count = 0
+        self._last_emb_ctx = None
 
     def _obs_tensor(self, mel_spec_sequence: list[np.ndarray]) -> torch.Tensor:
         out = []
@@ -159,6 +167,11 @@ class JEPAPredatorV2:
         obs_tensor = self._obs_tensor(obs_seq)            # (1, H, 4, 224, 224)
         with torch.no_grad():
             emb_ctx = self.model.encode(obs_tensor)       # (1, H, D)
+
+        # Cache last-timestep embedding for the federation data tap.
+        # Detach + clone so downstream consumers can keep references
+        # without holding the autograd graph or the planner's tensors.
+        self._last_emb_ctx = emb_ctx[:, -1].detach().clone()  # (1, D)
 
         # CEM
         mean = torch.zeros(self.action_dim, device=self.device)
