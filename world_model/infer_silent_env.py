@@ -447,7 +447,7 @@ async def ws_endpoint(ws: WebSocket):
                 random_goal = bool(msg.get('random_goal', False))
                 if random_goal:
                     _randomize_exit(env, np.random.default_rng(seed * 7919 + 13))
-                game_mode = msg.get('mode', 'escape')   # 'escape' | 'survival'
+                game_mode = msg.get('mode', 'survival')   # 'escape' | 'survival'
                 if game_mode == 'survival':
                     _make_survival(env)
                     # Scoring incentives so standing still isn't optimal:

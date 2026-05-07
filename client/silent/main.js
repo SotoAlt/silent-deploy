@@ -145,7 +145,6 @@ const el = {
 
   // toggle groups
   modeBtns:  document.querySelectorAll('.mode-btn'),
-  mode2Btns: document.querySelectorAll('.mode2-btn'),
   mapBtns:   document.querySelectorAll('.map-btn'),
 };
 
@@ -168,7 +167,6 @@ const state = {
   connected: false,
   levelIdx: 0,
   predatorMode: 'jepa_v2',
-  gameMode: 'survival',     // default = survive (with scoring)
   randomGoal: false,
   keys: { w: false, a: false, s: false, d: false },
   done: false,
@@ -228,7 +226,7 @@ function sendNewMatch() {
     type: 'new_match',
     level: LEVELS[state.levelIdx].id,
     predator: state.predatorMode,
-    mode: state.gameMode,
+    mode: 'survival',
     random_goal: state.randomGoal,
     seed: Date.now() & 0xffff,
   });
@@ -402,10 +400,6 @@ function bindToggleGroup(buttons, onSelect) {
 }
 bindToggleGroup(el.modeBtns, (b) => {
   state.predatorMode = b.dataset.mode;
-  if (state.connected) sendNewMatch();
-});
-bindToggleGroup(el.mode2Btns, (b) => {
-  state.gameMode = b.dataset.mode2;
   if (state.connected) sendNewMatch();
 });
 bindToggleGroup(el.mapBtns, (b) => {
