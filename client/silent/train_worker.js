@@ -93,11 +93,34 @@ const init = async () => {
   // Dynamic import works in both classic + module workers since 2020.
   const mod = await import(GAME_PREFIX + '/tfjs_forward.js');
 
-  status('init: fetching predictor weights (~63 MB, one-time)');
+  status('init: fetching predictor weights (0/63 MB)');
   const t0 = performance.now();
   const wResp = await fetch(GAME_PREFIX + '/weights/predictor.bin');
   if (!wResp.ok) throw new Error('weights fetch failed: ' + wResp.status);
-  const wBuf = await wResp.arrayBuffer();
+  // Stream so the panel reports live MB/MB progress instead of
+  // looking frozen for ~50s. Status text format matches train.js so
+  // fedProgressPct in main.js handles both code paths uniformly.
+  const totalBytes = parseInt(wResp.headers.get('content-length'), 10) || 63500000;
+  const totalMB = Math.round(totalBytes / 1048576);
+  const reader = wResp.body.getReader();
+  const chunks = [];
+  let received = 0;
+  let lastUpdate = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    if (received - lastUpdate > 200_000 || received === totalBytes) {
+      status('init: fetching predictor weights (' +
+             Math.round(received / 1048576) + '/' + totalMB + ' MB)');
+      lastUpdate = received;
+    }
+  }
+  const wBufArr = new Uint8Array(received);
+  let off = 0;
+  for (const c of chunks) { wBufArr.set(c, off); off += c.length; }
+  const wBuf = wBufArr.buffer;
   const wArr = mod.parseRelayBlob(wBuf);
   log(`weights: ${wBuf.byteLength.toLocaleString()} B in ${((performance.now()-t0)|0)} ms`);
 

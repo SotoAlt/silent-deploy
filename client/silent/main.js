@@ -528,11 +528,20 @@ function fedProgressPct(text, kind) {
   if (!text) return 0;
   if (text.startsWith('✓') || text.startsWith('✗')) return 1.0;
   if (text.startsWith('idle')) return 0;
+  // Init's 63 MB fetch is the slowest phase by far (~50s on first
+  // toggle-on). Smooth bar walk in [0.05, 0.20] driven by actual
+  // bytes received so the panel doesn't look frozen.
+  const dlMatch = text.match(/fetching predictor weights \((\d+)\/(\d+) MB\)/);
+  if (dlMatch) {
+    const cur = parseInt(dlMatch[1], 10);
+    const tot = Math.max(parseInt(dlMatch[2], 10), 1);
+    return 0.05 + 0.15 * (cur / tot);
+  }
   if (text.startsWith('init')) return 0.05;
   if (text.includes('worker starting')) return 0.05;
-  if (text.includes('connecting')) return 0.10;
-  if (text.includes('waiting for round')) return 0.15;
-  if (text.includes('syncing weights')) return 0.25;
+  if (text.includes('connecting')) return 0.22;
+  if (text.includes('waiting for round')) return 0.24;
+  if (text.includes('syncing weights')) return 0.28;
   if (text.includes('fetching batch')) return 0.35;
   const trainMatch = text.match(/training \((\d+)\/(\d+)\)/);
   if (trainMatch) {

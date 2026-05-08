@@ -130,7 +130,33 @@ window.SilentFedTrain = (() => {
     const t0 = performance.now();
     const wResp = await fetch(GAME_PREFIX + '/weights/predictor.bin');
     if (!wResp.ok) throw new Error('weights fetch failed: ' + wResp.status);
-    const wBuf = await wResp.arrayBuffer();
+    // Stream the body so the panel can report MB/MB progress live
+    // instead of looking frozen for ~50s. Falls back to 63 MB estimate
+    // if Content-Length is missing (HTTP/2 + gzip strips it on some
+    // proxies). The status string format is parsed by fedProgressPct
+    // in main.js to drive the progress bar in the 5%–20% slice.
+    const totalBytes = parseInt(wResp.headers.get('content-length'), 10) || 63500000;
+    const totalMB = Math.round(totalBytes / 1048576);
+    const reader = wResp.body.getReader();
+    const chunks = [];
+    let received = 0;
+    let lastUpdate = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      // Throttle status updates — every ~200 KB or 100 ms is enough.
+      if (received - lastUpdate > 200_000 || received === totalBytes) {
+        opts.onStatus?.('init: fetching predictor weights (' +
+                        Math.round(received / 1048576) + '/' + totalMB + ' MB)');
+        lastUpdate = received;
+      }
+    }
+    const wBufArr = new Uint8Array(received);
+    let off = 0;
+    for (const c of chunks) { wBufArr.set(c, off); off += c.length; }
+    const wBuf = wBufArr.buffer;
     const wArr = mod.parseRelayBlob(wBuf);
     log('weights: ' + wBuf.byteLength.toLocaleString() + ' B parsed (' +
         ((performance.now() - t0) | 0) + ' ms)');
