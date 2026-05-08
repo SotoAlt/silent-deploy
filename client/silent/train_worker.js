@@ -1,16 +1,7 @@
-// Phase 2: train-while-playing Web Worker.
-//
-// Same SGD round protocol as train.js but runs in a worker so the
-// game-loop main thread stays responsive. TF.js WASM backend is
-// single-threaded — slower than WebGL by 3-5x but doesn't compete
-// with the main-thread canvas + WS receive. Silent's gameplay
-// stays smooth while rounds run continuously in the background.
-//
-// Wire from main.js:
-//   const w = new Worker('/silent/train_worker.js');
-//   w.onmessage = (e) => { ... }; // status / roundDone / error / stopped
-//   w.postMessage({type: 'start'});
-//   w.postMessage({type: 'stop'});
+// Phase 2: train-while-playing Web Worker. Runs the same SGD round
+// protocol as train.js, but in a worker (TF.js WASM backend) so SGD
+// doesn't block the gameplay main thread. Single-threaded WASM is
+// 3-5x slower than WebGL but doesn't compete with canvas + WS receive.
 
 importScripts(
   'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js',
@@ -21,7 +12,6 @@ const HUB_BASE = 'https://jepa.waweapps.win/federated/';
 const GAME_ID = 'silent_v1';
 const GAME_PREFIX = HUB_BASE + 'games/' + GAME_ID;
 
-// RELAY binary wire format (matches federated/protocol.py + train.js).
 const DTYPE_F32 = 0;
 const DTYPE_I8 = 1;
 const MAGIC = [0x52, 0x45, 0x4c, 0x41, 0x59, 0, 0, 0];
@@ -33,7 +23,6 @@ const log = (text) => post({ type: 'log', text });
 let ctx = null;
 let manifest = null;
 let stopRequested = false;
-let running = false;
 
 // Sequence number persists across rounds in this worker session;
 // each round's cid is the same so the hub treats them as one
@@ -175,52 +164,56 @@ const trainAndPush = async (ctx, weightsBuf, env, ws) => {
   const emb = ctx.tf.tensor(embA.data, embA.shape, 'float32');
   const actions = ctx.tf.tensor(actA.data, actA.shape, 'float32');
 
-  // 4) K SGD steps. tf.tidy releases per-step intermediates.
-  const steps = (manifest && manifest.local_steps_per_round) || 2;
-  for (let i = 0; i < steps; i++) {
-    if (stopRequested) break;
-    const t0 = performance.now();
-    const lossT = ctx.optimizer.minimize(() => {
-      return ctx.tf.tidy(() => {
-        const out = ctx.predictTrainable(emb, actions, ctx.weights);
-        return ctx.tf.mean(ctx.tf.square(ctx.tf.sub(out.pred_emb, out.tgt_emb)));
-      });
-    }, true, varList);
-    const lossVal = (await lossT.data())[0];
-    lossT.dispose();
-    const dt = (performance.now() - t0) | 0;
-    log(`  step ${i + 1}/${steps}  loss=${lossVal.toExponential(4)}  (${dt} ms)`);
-    status('round ' + env.round_id + ': training (' + (i + 1) + '/' + steps + ')');
-  }
-  emb.dispose();
-  actions.dispose();
-
-  if (stopRequested) return null;
-
-  // 5) signSGD encode + upload.
-  status('round ' + env.round_id + ': encoding delta');
-  const curArrs = await Promise.all(varList.map((v) => v.data()));
-  const layers = [];
-  for (let li = 0; li < varNames.length; li++) {
-    const name = varNames[li];
-    const cur = curArrs[li];
-    const prev = before.get(name);
-    const signs = new Int8Array(cur.length);
-    let sumSq = 0;
-    for (let i = 0; i < cur.length; i++) {
-      const d = cur[i] - prev[i];
-      sumSq += d * d;
-      signs[i] = d > 0 ? 1 : (d < 0 ? -1 : 0);
+  // try/finally so emb + actions release even on mid-round error.
+  // Without this, an SGD step throwing leaks two big tensors per
+  // failure across an indefinitely-running worker.
+  try {
+    // 4) K SGD steps. tf.tidy releases per-step intermediates.
+    const steps = (manifest && manifest.local_steps_per_round) || 2;
+    for (let i = 0; i < steps; i++) {
+      if (stopRequested) throw new Error('stop requested mid-round');
+      const t0 = performance.now();
+      const lossT = ctx.optimizer.minimize(() => {
+        return ctx.tf.tidy(() => {
+          const out = ctx.predictTrainable(emb, actions, ctx.weights);
+          return ctx.tf.mean(ctx.tf.square(ctx.tf.sub(out.pred_emb, out.tgt_emb)));
+        });
+      }, true, varList);
+      const lossVal = (await lossT.data())[0];
+      lossT.dispose();
+      const dt = (performance.now() - t0) | 0;
+      log(`  step ${i + 1}/${steps}  loss=${lossVal.toExponential(4)}  (${dt} ms)`);
+      status('round ' + env.round_id + ': training (' + (i + 1) + '/' + steps + ')');
     }
-    const norm = Math.sqrt(sumSq);
-    const scale = norm / Math.max(Math.sqrt(cur.length), 1.0);
-    layers.push({ name, signs, scale, shape: varList[li].shape });
+
+    // 5) signSGD encode + upload.
+    status('round ' + env.round_id + ': encoding delta');
+    const curArrs = await Promise.all(varList.map((v) => v.data()));
+    const layers = [];
+    for (let li = 0; li < varNames.length; li++) {
+      const name = varNames[li];
+      const cur = curArrs[li];
+      const prev = before.get(name);
+      const signs = new Int8Array(cur.length);
+      let sumSq = 0;
+      for (let i = 0; i < cur.length; i++) {
+        const d = cur[i] - prev[i];
+        sumSq += d * d;
+        signs[i] = d > 0 ? 1 : (d < 0 ? -1 : 0);
+      }
+      const norm = Math.sqrt(sumSq);
+      const scale = norm / Math.max(Math.sqrt(cur.length), 1.0);
+      layers.push({ name, signs, scale, shape: varList[li].shape });
+    }
+    const blob = encodeDelta(layers);
+    ws.send(JSON.stringify({ t: 'delta', round_id: env.round_id, n_local_steps: steps }));
+    ws.send(blob.buffer);
+    log(`uploaded delta (${blob.length.toLocaleString()} B, ${layers.length} layers)`);
+    return { steps };
+  } finally {
+    emb.dispose();
+    actions.dispose();
   }
-  const blob = encodeDelta(layers);
-  ws.send(JSON.stringify({ t: 'delta', round_id: env.round_id, n_local_steps: steps }));
-  ws.send(blob.buffer);
-  log(`uploaded delta (${blob.length.toLocaleString()} B, ${layers.length} layers)`);
-  return { steps };
 };
 
 const runOneRound = async () => {
@@ -292,26 +285,26 @@ const runOneRound = async () => {
   });
 };
 
+let loopActive = false;
 const runLoop = async () => {
-  if (running) return;
-  running = true;
+  if (loopActive) return;
+  loopActive = true;
   stopRequested = false;
   log(`worker started cid=${cid}`);
   while (!stopRequested) {
     try {
       const result = await runOneRound();
       post({ type: 'roundDone', ...result });
-      // Brief pause between rounds — don't hammer the hub during
-      // sparse-traffic moments. Skipped if stop is requested.
       if (!stopRequested) await new Promise((r) => setTimeout(r, 1000));
     } catch (e) {
+      // "stop requested mid-round" is expected when the user toggles
+      // off — surface it as a stopped event, not an error.
+      if (stopRequested) break;
       post({ type: 'error', message: e.message || String(e) });
-      // Cooldown so a transient hub blip doesn't spin in a tight loop.
-      // 5s gives the hub time to come back without flooding logs.
-      if (!stopRequested) await new Promise((r) => setTimeout(r, 5000));
+      await new Promise((r) => setTimeout(r, 5000));
     }
   }
-  running = false;
+  loopActive = false;
   status('idle — gameplay feeds the pool');
   post({ type: 'stopped' });
   log(`worker stopped cid=${cid}`);

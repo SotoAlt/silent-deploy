@@ -525,6 +525,17 @@ function setFedStatus(text, kind) {
   el.fedStatus.classList.remove('train', 'done', 'err');
   if (kind) el.fedStatus.classList.add(kind);
 }
+function recordRoundDone(result) {
+  const accepted = result.accepted !== false;
+  fedRoundsContributed += 1;
+  el.fedRounds.textContent = fedRoundsContributed;
+  el.fedVal.textContent = result.val_loss.toFixed(4);
+  setFedStatus(
+    (accepted ? '✓ round ' : '✗ rejected ') + result.round_id +
+    ' · val=' + result.val_loss.toFixed(4),
+    accepted ? 'done' : 'err'
+  );
+}
 if (el.fedTrainBtn && window.SilentFedTrain) {
   el.fedTrainBtn.addEventListener('click', async () => {
     el.fedTrainBtn.disabled = true;
@@ -534,15 +545,7 @@ if (el.fedTrainBtn && window.SilentFedTrain) {
         onStatus: (s) => setFedStatus(s, 'train'),
         onLog: (msg, kind) => console.log('[fed]', msg, kind || ''),
       });
-      const accepted = result.accepted !== false;
-      fedRoundsContributed += 1;
-      el.fedRounds.textContent = fedRoundsContributed;
-      el.fedVal.textContent = result.val_loss.toFixed(4);
-      setFedStatus(
-        (accepted ? '✓ round ' : '✗ rejected ') + result.round_id +
-        ' · val=' + result.val_loss.toFixed(4),
-        accepted ? 'done' : 'err'
-      );
+      recordRoundDone(result);
     } catch (e) {
       console.error('[fed]', e);
       setFedStatus('error: ' + (e.message || e), 'err');
@@ -557,51 +560,47 @@ if (el.fedTrainBtn && window.SilentFedTrain) {
 // Single-threaded WASM is 3-5x slower than WebGL but doesn't compete
 // with canvas paints + WS receives — predator hunting stays smooth.
 let fedWorker = null;
-const ensureFedWorker = () => {
-  if (fedWorker) return fedWorker;
-  fedWorker = new Worker('train_worker.js');
-  fedWorker.onmessage = (e) => {
+const spawnFedWorker = () => {
+  const w = new Worker('train_worker.js');
+  w.onmessage = (e) => {
     const { type } = e.data || {};
-    if (type === 'status') {
-      setFedStatus(e.data.text, 'train');
-    } else if (type === 'log') {
-      console.log('[fed-worker]', e.data.text);
-    } else if (type === 'roundDone') {
-      const accepted = e.data.accepted !== false;
-      fedRoundsContributed += 1;
-      el.fedRounds.textContent = fedRoundsContributed;
-      el.fedVal.textContent = e.data.val_loss.toFixed(4);
-      setFedStatus(
-        (accepted ? '✓ round ' : '✗ rejected ') + e.data.round_id +
-        ' · val=' + e.data.val_loss.toFixed(4),
-        accepted ? 'done' : 'err'
-      );
-    } else if (type === 'error') {
+    if (type === 'status') setFedStatus(e.data.text, 'train');
+    else if (type === 'log') console.log('[fed-worker]', e.data.text);
+    else if (type === 'roundDone') recordRoundDone(e.data);
+    else if (type === 'error') {
       console.error('[fed-worker]', e.data.message);
       setFedStatus('error: ' + e.data.message, 'err');
     } else if (type === 'stopped') {
+      // Worker has cleanly exited its loop; terminate to reclaim the
+      // ~63 MB of resident weights. Re-enable the manual button now
+      // (NOT immediately on toggle-off, which would let the user
+      // double-fire while the worker is still mid-round).
+      if (fedWorker) {
+        fedWorker.terminate();
+        fedWorker = null;
+      }
+      if (el.fedTrainBtn) el.fedTrainBtn.disabled = false;
       setFedStatus('idle — gameplay feeds the pool', '');
     }
   };
-  fedWorker.onerror = (e) => {
+  w.onerror = (e) => {
     console.error('[fed-worker] error event:', e);
     setFedStatus('worker error: ' + (e.message || 'check console'), 'err');
   };
-  return fedWorker;
+  return w;
 };
 
 if (el.fedToggle) {
   el.fedToggle.addEventListener('change', () => {
     if (el.fedToggle.checked) {
-      // Disable manual button while continuous mode runs — both fighting
-      // for the same hub WS would create round_id confusion.
       if (el.fedTrainBtn) el.fedTrainBtn.disabled = true;
-      const w = ensureFedWorker();
-      w.postMessage({ type: 'start' });
+      if (!fedWorker) fedWorker = spawnFedWorker();
+      fedWorker.postMessage({ type: 'start' });
       setFedStatus('worker starting...', 'train');
     } else if (fedWorker) {
       fedWorker.postMessage({ type: 'stop' });
-      if (el.fedTrainBtn) el.fedTrainBtn.disabled = false;
+      // Manual button re-enables only when the worker confirms `stopped`
+      // — see onmessage handler above.
     }
   });
 }
