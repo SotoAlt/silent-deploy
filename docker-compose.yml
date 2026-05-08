@@ -3,6 +3,12 @@ services:
     build: .
     container_name: silent
     restart: unless-stopped
+    # Cap RAM so a leak / pool growth here can't OOM the whole VPS —
+    # the kernel kills silent (auto-restarts) instead of evicting
+    # sshd/caddy. 1.5 GB sits well above steady-state (~800 MB:
+    # PyTorch + v9 ckpt + CEM planner) on the CPX31 8 GB box.
+    mem_limit: 1500m
+    memswap_limit: 1500m
     volumes:
       - ./checkpoints:/app/checkpoints:ro
     networks:
