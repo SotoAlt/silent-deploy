@@ -175,15 +175,16 @@ window.SilentFedTrain = (() => {
       let settled = false;
       const settle = (fn, val) => { if (!settled) { settled = true; fn(val); } };
 
-      // 90s timeout — covers connect + round-wait + train + upload.
-      // SGD on M-series CPUs takes ~5s for 2 steps on the silent_v1
-      // predictor; round-wait depends on quorum (≥2 by default), so
-      // the budget is dominated by other clients showing up. 90s is
-      // generous; bump if quorum changes.
+      // 180s timeout — covers connect + round-wait + 63 MB weights
+      // broadcast + 2 SGD steps + 16 MB delta upload + aggregate +
+      // round_done. On a shared VPS where the federated container
+      // contends with silent gameplay CPU, the broadcast + aggregate
+      // phases each can run 30-60s. 90s was too tight; saw rounds
+      // succeed hub-side after the client had given up.
       const tid = setTimeout(() => {
         try { ws.close(); } catch (_) {}
-        settle(reject, new Error('round timeout (90s) — likely waiting for quorum'));
-      }, 90000);
+        settle(reject, new Error('round timeout (180s) — server slow or quorum unmet'));
+      }, 180000);
 
       ws.onopen = () => {
         log('connected; hello cid=' + cid, 'send');
