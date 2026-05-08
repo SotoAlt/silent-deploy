@@ -511,7 +511,7 @@ el.helpBtn.addEventListener('click', unlockAudio);
 document.addEventListener('click', unlockAudio, { once: false });
 
 // ---- federation: one-shot training round ------------------------------
-// Click "🧠 train round" → browser pulls latest predictor weights from
+// Click "train one round" → browser pulls latest predictor weights from
 // the hub, fetches a training batch (audio embeddings pre-encoded
 // server-side), runs K SGD steps locally, uploads the signSGD delta.
 // Hub aggregates across clients per round and broadcasts the new
