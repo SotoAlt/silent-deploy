@@ -35,13 +35,17 @@ COPY client/ /app/client/
 ENV SDL_VIDEODRIVER=dummy
 ENV PYTHONUNBUFFERED=1
 
-# CPU thread cap for Hetzner CPX21 (shared 4 vCPU). Prevents matmul thread
-# contention with relay/lepong on the same host. CEM samples/iters left at
-# default (16/2) — game tick rate is now decoupled from planner latency
-# via async background planning, so full CEM quality is fine even at ~200ms.
-ENV SILENT_TORCH_THREADS=2
-ENV OMP_NUM_THREADS=2
-ENV MKL_NUM_THREADS=2
+# CPU thread budget for the predator's CEM planner. Tuned for the
+# CPX31 (4 vCPU, 8 GB) where federated/relay/lepong sit < 4% CPU on
+# average — silent is the gameplay-critical container, so it gets
+# nearly the whole CPU budget. Earlier 2-thread cap (CPX21 era) was
+# dropping planner latency to 200-260ms which made the predator use
+# stale observations and feel "dumb". 4 threads brings it under 100ms.
+# CEM samples/iters left at default (16/2); async background planning
+# keeps the game tick rate decoupled from planner latency anyway.
+ENV SILENT_TORCH_THREADS=4
+ENV OMP_NUM_THREADS=4
+ENV MKL_NUM_THREADS=4
 
 EXPOSE 8801
 
