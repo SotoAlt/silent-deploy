@@ -498,6 +498,27 @@
   }
   .fed-link:hover { color: var(--teal); }
 
+  /* Phase-based progress bar — fills as the federation round walks
+     through init → connect → sync → fetch → train → upload → done.
+     Idle = invisible. In-flight = filling. Final state = 100% + fade. */
+  .fed-progress {
+    height: 2px; width: 100%;
+    background: var(--edge);
+    border-radius: 1px;
+    overflow: hidden;
+    margin-top: 4px;
+    margin-bottom: 2px;
+  }
+  .fed-progress-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--coral), var(--teal));
+    transition: width 0.4s ease, opacity 0.4s ease;
+    opacity: 0;
+  }
+  .fed-progress-fill.active { opacity: 1; }
+  .fed-progress-fill.done { opacity: 0.4; }
+
   /* Toggle row for "train while playing". Inline with the rest of the
      federation panel — single line, checkbox + label. Distinct from
      the bigger one-shot button so the user can clearly tell the modes
@@ -698,6 +719,7 @@
         <span class="fed-toggle-hint">background</span>
       </label>
       <div class="fed-status" id="fed-status">idle — gameplay feeds the pool</div>
+      <div class="fed-progress"><div class="fed-progress-fill" id="fed-progress-fill"></div></div>
       <div class="fed-stat-row"><span>rounds contributed</span><span class="val" id="fed-rounds">0</span></div>
       <div class="fed-stat-row"><span>last val_loss</span><span class="val" id="fed-val">—</span></div>
       <a class="fed-link" href="https://jepa.waweapps.win/federated/admin" target="_blank" rel="noopener">view hub →</a>

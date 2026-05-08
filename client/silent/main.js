@@ -152,6 +152,7 @@ const el = {
   fedStatus:   $('fed-status'),
   fedRounds:   $('fed-rounds'),
   fedVal:      $('fed-val'),
+  fedProgressFill: $('fed-progress-fill'),
 };
 
 // Audio: on/off flag. AudioContext is created lazily on first user gesture.
@@ -519,11 +520,44 @@ document.addEventListener('click', unlockAudio, { once: false });
 // click (post-match); Phase 2 will move SGD into a Web Worker so it
 // can run concurrently with gameplay.
 let fedRoundsContributed = 0;
+
+// Map status text → progress percent. Single source of truth for the
+// federation-round phase progression; keeps the progress bar in sync
+// with whatever string the trainer (button or worker) decided to post.
+function fedProgressPct(text, kind) {
+  if (!text) return 0;
+  if (text.startsWith('✓') || text.startsWith('✗')) return 1.0;
+  if (text.startsWith('idle')) return 0;
+  if (text.startsWith('init')) return 0.05;
+  if (text.includes('worker starting')) return 0.05;
+  if (text.includes('connecting')) return 0.10;
+  if (text.includes('waiting for round')) return 0.15;
+  if (text.includes('syncing weights')) return 0.25;
+  if (text.includes('fetching batch')) return 0.35;
+  const trainMatch = text.match(/training \((\d+)\/(\d+)\)/);
+  if (trainMatch) {
+    const cur = parseInt(trainMatch[1], 10);
+    const total = parseInt(trainMatch[2], 10);
+    return 0.40 + 0.30 * (cur / total);   // 40% → 70%
+  }
+  if (text.includes('encoding delta')) return 0.80;
+  if (text.includes('uploaded delta') || text.includes('awaiting round_done')) return 0.92;
+  if (kind === 'err') return 0;
+  return 0;
+}
+
 function setFedStatus(text, kind) {
   if (!el.fedStatus) return;
   el.fedStatus.textContent = text;
   el.fedStatus.classList.remove('train', 'done', 'err');
   if (kind) el.fedStatus.classList.add(kind);
+  if (el.fedProgressFill) {
+    const pct = fedProgressPct(text, kind);
+    el.fedProgressFill.style.width = (pct * 100).toFixed(0) + '%';
+    el.fedProgressFill.classList.remove('active', 'done');
+    if (pct >= 1) el.fedProgressFill.classList.add('done');
+    else if (pct > 0) el.fedProgressFill.classList.add('active');
+  }
 }
 function recordRoundDone(result) {
   const accepted = result.accepted !== false;
