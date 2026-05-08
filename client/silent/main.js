@@ -148,6 +148,7 @@ const el = {
 
   // federation panel
   fedTrainBtn: $('fed-train-btn'),
+  fedToggle:   $('fed-toggle'),
   fedStatus:   $('fed-status'),
   fedRounds:   $('fed-rounds'),
   fedVal:      $('fed-val'),
@@ -547,6 +548,60 @@ if (el.fedTrainBtn && window.SilentFedTrain) {
       setFedStatus('error: ' + (e.message || e), 'err');
     } finally {
       el.fedTrainBtn.disabled = false;
+    }
+  });
+}
+
+// Phase 2: train-while-playing toggle. SGD runs in a Web Worker
+// (TF.js WASM backend) so the gameplay main thread stays responsive.
+// Single-threaded WASM is 3-5x slower than WebGL but doesn't compete
+// with canvas paints + WS receives — predator hunting stays smooth.
+let fedWorker = null;
+const ensureFedWorker = () => {
+  if (fedWorker) return fedWorker;
+  fedWorker = new Worker('train_worker.js');
+  fedWorker.onmessage = (e) => {
+    const { type } = e.data || {};
+    if (type === 'status') {
+      setFedStatus(e.data.text, 'train');
+    } else if (type === 'log') {
+      console.log('[fed-worker]', e.data.text);
+    } else if (type === 'roundDone') {
+      const accepted = e.data.accepted !== false;
+      fedRoundsContributed += 1;
+      el.fedRounds.textContent = fedRoundsContributed;
+      el.fedVal.textContent = e.data.val_loss.toFixed(4);
+      setFedStatus(
+        (accepted ? '✓ round ' : '✗ rejected ') + e.data.round_id +
+        ' · val=' + e.data.val_loss.toFixed(4),
+        accepted ? 'done' : 'err'
+      );
+    } else if (type === 'error') {
+      console.error('[fed-worker]', e.data.message);
+      setFedStatus('error: ' + e.data.message, 'err');
+    } else if (type === 'stopped') {
+      setFedStatus('idle — gameplay feeds the pool', '');
+    }
+  };
+  fedWorker.onerror = (e) => {
+    console.error('[fed-worker] error event:', e);
+    setFedStatus('worker error: ' + (e.message || 'check console'), 'err');
+  };
+  return fedWorker;
+};
+
+if (el.fedToggle) {
+  el.fedToggle.addEventListener('change', () => {
+    if (el.fedToggle.checked) {
+      // Disable manual button while continuous mode runs — both fighting
+      // for the same hub WS would create round_id confusion.
+      if (el.fedTrainBtn) el.fedTrainBtn.disabled = true;
+      const w = ensureFedWorker();
+      w.postMessage({ type: 'start' });
+      setFedStatus('worker starting...', 'train');
+    } else if (fedWorker) {
+      fedWorker.postMessage({ type: 'stop' });
+      if (el.fedTrainBtn) el.fedTrainBtn.disabled = false;
     }
   });
 }

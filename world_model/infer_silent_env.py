@@ -180,6 +180,17 @@ async def train_js():
     )
 
 
+@app.get("/train_worker.js")
+async def train_worker_js():
+    # Phase 2: Web Worker that runs federation training in the
+    # background so SGD doesn't block the gameplay main thread.
+    return FileResponse(
+        _CLIENT_DIR / "train_worker.js",
+        media_type="application/javascript",
+        headers=_NO_CACHE,
+    )
+
+
 @app.get("/levels")
 async def list_levels():
     return {"levels": list(LEVELS.keys())}

@@ -498,6 +498,32 @@
   }
   .fed-link:hover { color: var(--teal); }
 
+  /* Toggle row for "train while playing". Inline with the rest of the
+     federation panel — single line, checkbox + label. Distinct from
+     the bigger one-shot button so the user can clearly tell the modes
+     apart: button = single round, toggle = continuous background. */
+  .fed-toggle-row {
+    display: flex; align-items: center; gap: 8px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--ink-dim);
+    cursor: pointer;
+    padding: 6px 0;
+  }
+  .fed-toggle-row:hover { color: var(--ink); }
+  .fed-toggle-row input[type="checkbox"] {
+    accent-color: var(--coral);
+    cursor: pointer;
+    width: 14px; height: 14px;
+  }
+  .fed-toggle-row .fed-toggle-hint {
+    color: var(--ink-faint);
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    margin-left: auto;
+  }
+
   /* -- footer console --------------------------------------------------- */
   .console {
     grid-column: 1 / -1; grid-row: 3;
@@ -666,6 +692,11 @@
     <h3>Federation</h3>
     <div class="hud-card fed-panel">
       <button class="fed-btn" id="fed-train-btn">🧠 train round</button>
+      <label class="fed-toggle-row">
+        <input type="checkbox" id="fed-toggle">
+        <span>🔄 train while playing</span>
+        <span class="fed-toggle-hint">background</span>
+      </label>
       <div class="fed-status" id="fed-status">idle — gameplay feeds the pool</div>
       <div class="fed-stat-row"><span>rounds contributed</span><span class="val" id="fed-rounds">0</span></div>
       <div class="fed-stat-row"><span>last val_loss</span><span class="val" id="fed-val">—</span></div>
