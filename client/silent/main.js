@@ -145,7 +145,6 @@ const el = {
 
   // toggle groups
   modeBtns:  document.querySelectorAll('.mode-btn'),
-  mapBtns:   document.querySelectorAll('.map-btn'),
 
   // federation panel
   fedTrainBtn: $('fed-train-btn'),
@@ -173,7 +172,7 @@ const state = {
   connected: false,
   levelIdx: 0,
   predatorMode: 'jepa_v2',
-  randomGoal: false,
+  randomGoal: true,
   keys: { w: false, a: false, s: false, d: false },
   done: false,
   lastPayload: null,
@@ -406,10 +405,6 @@ function bindToggleGroup(buttons, onSelect) {
 }
 bindToggleGroup(el.modeBtns, (b) => {
   state.predatorMode = b.dataset.mode;
-  if (state.connected) sendNewMatch();
-});
-bindToggleGroup(el.mapBtns, (b) => {
-  state.randomGoal = b.dataset.rand === '1';
   if (state.connected) sendNewMatch();
 });
 

@@ -424,7 +424,7 @@
   .hud-row.score-active .val { color: var(--amber); }
 
   .mode-toggle { display: flex; gap: 6px; }
-  .mode-btn, .map-btn {
+  .mode-btn {
     flex: 1;
     background: transparent;
     border: 1px solid var(--edge);
@@ -437,16 +437,11 @@
     cursor: pointer;
     transition: all 0.18s;
   }
-  .mode-btn:hover, .map-btn:hover { color: var(--ink); }
+  .mode-btn:hover { color: var(--ink); }
   .mode-btn.active {
     border-color: var(--coral);
     color: var(--coral);
     background: var(--coral-soft);
-  }
-  .map-btn.active {
-    border-color: var(--teal);
-    color: var(--teal);
-    background: var(--teal-faint);
   }
 
   /* -- federation training panel ---------------------------------------- */
@@ -668,12 +663,6 @@
       <button class="mode-btn" data-mode="jepa_test3">federation · 3F ep50</button>
     </div>
 
-    <h3>Goal</h3>
-    <div class="hud-card mode-toggle">
-      <button class="map-btn active" data-rand="0">fixed</button>
-      <button class="map-btn" data-rand="1">random</button>
-    </div>
-
     <h3>Run</h3>
     <div class="hud-card">
       <div class="hud-row"><span>time</span><span class="val" id="hud-time">00.0</span></div>
@@ -715,7 +704,7 @@
     <li><span class="num">1</span><span><strong>Move</strong> with <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd>. You are the teal dot. The coral dot is the predator.</span></li>
     <li><span class="num">2</span><span><strong>Survive 90 seconds.</strong> Grab the amber dots for <strong>+25 points</strong> each, and skirt the predator at safe distance for a continuous proximity bonus.</span></li>
     <li><span class="num">3</span><span>The predator <em>echolocates</em> with cardioid microphones. Standing still for too long leaks audio — you can&rsquo;t camp safely.</span></li>
-    <li><span class="num">4</span><span>Right rail toggles the <em>predator</em> model (canonical · baseline · federation) and the <em>goal</em> (fixed vs random).</span></li>
+    <li><span class="num">4</span><span>Right rail toggles the <em>predator</em> model (canonical · baseline · federation) and runs <em>federated training</em> in your tab — your machine, your gradient.</span></li>
   </ol>
   <div class="howto-close">
     <button class="howto-dismiss" id="howto-dismiss">got it</button>
