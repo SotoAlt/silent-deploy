@@ -526,7 +526,9 @@ let fedRoundsContributed = 0;
 // with whatever string the trainer (button or worker) decided to post.
 function fedProgressPct(text, kind) {
   if (!text) return 0;
-  if (text.startsWith('✓') || text.startsWith('✗')) return 1.0;
+  // Final-round states: panel text starts with "round N · ..." or
+  // "rejected N · ..." (post-emoji-removal).
+  if (/^(round|rejected) \d+/.test(text)) return 1.0;
   if (text.startsWith('idle')) return 0;
   // Init's 63 MB fetch is the slowest phase by far (~50s on first
   // toggle-on). Smooth bar walk in [0.05, 0.20] driven by actual
@@ -569,15 +571,24 @@ function setFedStatus(text, kind) {
   }
 }
 function recordRoundDone(result) {
-  const accepted = result.accepted !== false;
+  // val_loss is null when the hub rejected EVERY delta in this round
+  // (sanitized server-side from NaN). That's not a per-client reject —
+  // it's a "no aggregator update happened" signal. Show it distinctly.
+  const allRejected = result.val_loss == null;
+  const accepted = result.accepted !== false && !allRejected;
   fedRoundsContributed += 1;
   el.fedRounds.textContent = fedRoundsContributed;
-  el.fedVal.textContent = result.val_loss.toFixed(4);
-  setFedStatus(
-    (accepted ? '✓ round ' : '✗ rejected ') + result.round_id +
-    ' · val=' + result.val_loss.toFixed(4),
-    accepted ? 'done' : 'err'
-  );
+  el.fedVal.textContent = allRejected ? '—' : result.val_loss.toFixed(4);
+  let statusText, statusKind;
+  if (allRejected) {
+    statusText = 'round ' + result.round_id + ' · all deltas rejected';
+    statusKind = 'err';
+  } else {
+    statusText = (accepted ? 'round ' : 'rejected ') + result.round_id +
+                 ' · val=' + result.val_loss.toFixed(4);
+    statusKind = accepted ? 'done' : 'err';
+  }
+  setFedStatus(statusText, statusKind);
 }
 if (el.fedTrainBtn && window.SilentFedTrain) {
   el.fedTrainBtn.addEventListener('click', async () => {
