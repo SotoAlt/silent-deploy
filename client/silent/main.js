@@ -644,12 +644,32 @@ const spawnFedWorker = () => {
   return w;
 };
 
+// Worker can't access window.AuraPrivy directly — main thread fetches
+// the token here and pumps it via postMessage. Refreshes on each
+// 'start' AND whenever the Privy widget emits a state change.
+async function _currentPrivyToken() {
+  try {
+    return (window.AuraPrivy && window.AuraPrivy.isLoggedIn())
+      ? await window.AuraPrivy.getAccessToken()
+      : null;
+  } catch (e) {
+    console.warn('[fed] worker token refresh failed', e);
+    return null;
+  }
+}
+window.addEventListener('aura-privy-changed', async () => {
+  if (fedWorker) {
+    fedWorker.postMessage({ type: 'token', token: await _currentPrivyToken() });
+  }
+});
+
 if (el.fedToggle) {
-  el.fedToggle.addEventListener('change', () => {
+  el.fedToggle.addEventListener('change', async () => {
     if (el.fedToggle.checked) {
       if (el.fedTrainBtn) el.fedTrainBtn.disabled = true;
       if (!fedWorker) fedWorker = spawnFedWorker();
-      fedWorker.postMessage({ type: 'start' });
+      const token = await _currentPrivyToken();
+      fedWorker.postMessage({ type: 'start', token });
       setFedStatus('worker starting...', 'train');
     } else if (fedWorker) {
       fedWorker.postMessage({ type: 'stop' });

@@ -260,10 +260,13 @@ const runOneRound = async () => {
     }, 180000);
 
     ws.onopen = () => {
+      // _privyToken is set by main thread via postMessage {type:'token', token}
+      // BEFORE start. Null = anonymous; hub falls back to SelfAsserted.
       ws.send(JSON.stringify({
         t: 'hello',
         client_id: cid,
         generation: manifest ? manifest.generation : undefined,
+        privy_token: _privyToken,
       }));
       status('waiting for round announce');
     };
@@ -333,8 +336,19 @@ const runLoop = async () => {
   log(`worker stopped cid=${cid}`);
 };
 
+// Latest Privy access token, refreshed by main thread before each
+// round-start. Null = anonymous; hub falls back to SelfAsserted
+// (rate-limited via the per-day cap).
+let _privyToken = null;
+
 self.onmessage = (e) => {
-  const { type } = e.data || {};
-  if (type === 'start') runLoop();
-  else if (type === 'stop') stopRequested = true;
+  const { type, token } = e.data || {};
+  if (type === 'token') {
+    _privyToken = (typeof token === 'string' && token) ? token : null;
+  } else if (type === 'start') {
+    if (typeof token === 'string' && token) _privyToken = token;
+    runLoop();
+  } else if (type === 'stop') {
+    stopRequested = true;
+  }
 };
