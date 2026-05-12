@@ -191,6 +191,17 @@ async def train_worker_js():
     )
 
 
+@app.get("/privy.js")
+async def privy_js():
+    # Privy auth widget for the federation panel. ESM module —
+    # lazy-loads React + Privy SDK from esm.sh on first DOMContentLoaded.
+    return FileResponse(
+        _CLIENT_DIR / "privy.js",
+        media_type="application/javascript",
+        headers=_NO_CACHE,
+    )
+
+
 @app.get("/levels")
 async def list_levels():
     return {"levels": list(LEVELS.keys())}
